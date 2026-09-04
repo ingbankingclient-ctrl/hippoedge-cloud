@@ -27,9 +27,9 @@ from .selection_service import choose
 from .utils import sanitize_objective_payload, to_int
 
 settings=get_settings()
-HISTORY_ENRICHMENT_VERSION = "2026.09.03-v5"
+HISTORY_ENRICHMENT_VERSION = "2026.09.04-v6-unlimited"
 PMU_OPPONENT_ENRICHMENT_VERSION = "2026.09.03-v3-pmu"
-OPPONENT_ENRICHMENT_VERSION = "2026.09.03-v3-complete"
+OPPONENT_ENRICHMENT_VERSION = "2026.09.04-v4-complete-retry"
 
 
 def _source_label(current: object, incoming: object) -> str | None:
@@ -105,6 +105,20 @@ def _merge_objective_opponents(
     return list(combined.values())
 
 
+def _recent_lookup_failure(raw: dict) -> bool:
+    if str(raw.get("geny_course_lookup_status") or "") != "unavailable":
+        return False
+    checked = str(raw.get("geny_course_checked_at") or "").strip()
+    if not checked:
+        return False
+    try:
+        checked_at = datetime.fromisoformat(checked)
+    except ValueError:
+        return False
+    now = datetime.now(checked_at.tzinfo) if checked_at.tzinfo is not None else datetime.now()
+    return (now - checked_at).total_seconds() < max(0, int(settings.history_course_retry_cooldown_seconds))
+
+
 async def _enrich_geny_course_details(day: date, write_lock: asyncio.Lock, provider: object) -> bool:
     """Progressively attach every runner from exact Geny historical races.
 
@@ -139,7 +153,11 @@ async def _enrich_geny_course_details(day: date, write_lock: asyncio.Lock, provi
                 continue
             status = str(raw.get("geny_course_lookup_status") or "")
             attempts = int(raw.get("geny_course_lookup_attempts") or 0)
-            if status == "ok" or status in {"no_participants", "identity_mismatch"} or attempts >= 3:
+            if status == "ok" or status in {"no_participants", "identity_mismatch"}:
+                continue
+            # Transient network/provider failures are never abandoned permanently.
+            # A short cooldown prevents a tight retry loop inside one background run.
+            if _recent_lookup_failure(raw):
                 continue
             grouped.setdefault(course_id, []).append(history_id)
             dates[course_id] = max(dates.get(course_id, history_date), history_date)
@@ -178,7 +196,6 @@ async def _enrich_geny_course_details(day: date, write_lock: asyncio.Lock, provi
                             "geny_course_lookup_warning": str(exc),
                             "geny_course_checked_at": datetime.now().isoformat(),
                         }
-                        pending_after_batch = pending_after_batch or attempts < 3
                     db.commit()
                 except Exception:
                     db.rollback()
@@ -261,7 +278,7 @@ async def _enrich_geny_course_details(day: date, write_lock: asyncio.Lock, provi
         # Finalize one horse at a time, then analyse one race at a time.  The
         # former all-day query retained every runner career plus every old
         # snapshot/score in the same SQLAlchemy identity map.  This preserves
-        # the complete 500-row histories and A→B→C→D method while bounding the
+        # the complete published histories and A→B→C→D method while bounding the
         # working set to one horse/race.
         db = SessionLocal()
         try:
@@ -297,7 +314,6 @@ async def _enrich_geny_course_details(day: date, write_lock: asyncio.Lock, provi
                 terminal = sum(
                     1 for row in geny_rows
                     if (row.raw or {}).get("geny_course_lookup_status") in {"no_participants", "identity_mismatch"}
-                    or int((row.raw or {}).get("geny_course_lookup_attempts") or 0) >= 3
                 )
                 pending = max(0, len(geny_rows) - linked - terminal)
                 opponent_rows = sum(1 for row in runner.history if row.opponents)
@@ -350,14 +366,19 @@ async def _enrich_geny_course_details(day: date, write_lock: asyncio.Lock, provi
     return pending_after_batch
 
 
-async def _enrich_day_histories(day: date, write_lock: asyncio.Lock) -> bool:
+async def _enrich_day_histories(
+    day: date,
+    write_lock: asyncio.Lock,
+    provider: object | None = None,
+) -> None:
     """Fetch slow horse histories without blocking programme/result reads.
 
-    Every horse is committed as soon as its profile has been checked.  The old
-    all-or-nothing batch kept an entire day in memory and lost every completed
-    profile when a free cloud instance stopped before the last horse.
+    Every horse is committed as soon as its profile has been checked.  Exact
+    historical-race linking is intentionally orchestrated by the wrapper task
+    instead of being chained behind this sweep.  That keeps the opponent
+    network moving even when a handful of horse-profile lookups are slow.
     """
-    provider = provider_factory()
+    provider = provider or provider_factory()
     importer = ImportService(provider)
     db = SessionLocal()
     try:
@@ -584,7 +605,7 @@ async def _enrich_day_histories(day: date, write_lock: asyncio.Lock) -> bool:
             finally:
                 db.close()
 
-        # Release the 500-row provider payload before loading the complete field
+        # Release the full provider payload before loading the complete field
         # for scoring. Persisted rows are now the source of truth.
         payload = None
         if imported:
@@ -609,21 +630,40 @@ async def _enrich_day_histories(day: date, write_lock: asyncio.Lock) -> bool:
                 finally:
                     db.close()
 
-    return await _enrich_geny_course_details(day, write_lock, provider)
+    return None
 
 
 async def _enrich_day_histories_safe(day: date, write_lock: asyncio.Lock) -> None:
     try:
-        # Each pass is bounded, but it immediately resumes the next batch until
-        # every stored career race is either linked or explicitly exhausted.
-        # Cancellation remains immediate when the service shuts down.
-        remaining = True
-        passes = 0
-        while remaining and passes < 50:
-            remaining = bool(await _enrich_day_histories(day, write_lock))
-            passes += 1
-            if remaining:
-                await asyncio.sleep(0)
+        # Reuse one provider/client for the whole background run so its bounded
+        # caches remain useful without growing unbounded.
+        provider = provider_factory()
+
+        # IMPORTANT: link one exact-race batch *before* the horse-profile sweep.
+        # On a warm database there can already be thousands of verified Geny
+        # course ids. Previously they all waited behind the last few slow or
+        # unavailable horse profiles, which made the UI sit at 0/N for a long
+        # time even though enough persisted data existed to start immediately.
+        remaining = bool(await _enrich_geny_course_details(day, write_lock, provider))
+
+        # Refresh each horse profile once for this task. Do not run the same
+        # profile sweep again for every 120-course network batch. That old loop
+        # repeatedly retried the same slow profiles and could starve the exact
+        # opponent linking work.
+        await _enrich_day_histories(day, write_lock, provider)
+
+        # The profile sweep may have added more Geny course ids. Continue in
+        # bounded batches until every stored historical race is linked or has
+        # reached a terminal checked state. There is deliberately no fixed
+        # 50-pass ceiling: 120 * 50 = 6000, while a normal full day can exceed
+        # that (the production example already contains more than 7000 rows).
+        # Memory remains bounded by _enrich_geny_course_details' batch size and
+        # cancellation is immediate when Render stops the worker.
+        while True:
+            remaining = bool(await _enrich_geny_course_details(day, write_lock, provider))
+            if not remaining:
+                break
+            await asyncio.sleep(0)
     except asyncio.CancelledError:
         raise
     except Exception as exc:
@@ -981,10 +1021,7 @@ def history_status(day: date, db: Session=Depends(get_db)):
             geny_course_rows+=1
             lookup_status=str(history_raw.get("geny_course_lookup_status") or "")
             geny_course_linked+=int(lookup_status=="ok")
-            terminal=(
-                lookup_status in {"no_participants","identity_mismatch"}
-                or int(history_raw.get("geny_course_lookup_attempts") or 0)>=3
-            )
+            terminal=(lookup_status in {"no_participants","identity_mismatch"})
             geny_course_pending+=int(lookup_status!="ok" and not terminal)
 
     for runner_id, runner_raw_value in runner_rows:

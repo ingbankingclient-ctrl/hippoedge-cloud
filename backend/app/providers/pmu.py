@@ -97,7 +97,7 @@ class PmuProvider(RacingProvider):
         geny_history_enabled: bool = True,
         official_history_enabled: bool = True,
         history_request_interval_seconds: float = 0.35,
-        history_max_rows: int = 500,
+        history_max_rows: int = 0,
         history_cache_size: int = 16,
         history_course_cache_size: int = 128,
         history_directory_cache_size: int = 4,

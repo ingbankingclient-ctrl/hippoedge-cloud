@@ -9,7 +9,7 @@ Contrôle effectué avant livraison selon la méthode fusionnée des conversatio
 - [x] Historiques trot : LeTROT prioritaire, Geny complémentaire, identité exacte, dédoublonnage et priorité des faits officiels ; un refus 403 coupe les nouvelles tentatives LeTROT du traitement courant sans bloquer Geny.
 - [x] Galop français et étranger : France Galop reste une frontière officielle protégée ; Geny ne complète que lorsque l’identité est vérifiée.
 - [x] Galop/trot étrangers : les lignes Geny objectives sont admissibles pour les courses présentes au programme ; aucune source à compte, CAPTCHA ou abonnement n’est aspirée silencieusement.
-- [x] Le flux public Geny lit le tableau de carrière complet de la fiche vérifiée, jusqu’à 500 courses, et non seulement les cartes visibles dans le HTML.
+- [x] Le flux public Geny lit le tableau de carrière complet de la fiche vérifiée, sans plafond local de 500 courses, et non seulement les cartes visibles dans le HTML.
 - [x] Chaque ancienne course Geny est identifiée exactement puis relue pour récupérer tous ses partants/rangs ; une course commune à plusieurs chevaux n’est téléchargée qu’une fois.
 - [x] Checkpoint course par course, trois tentatives maximum et reprise automatique ; couverture exacte exposée par l’API et l’application.
 - [x] Chaque partant actif reçoit cinq notes indépendantes et un paragraphe factuel ; les références objectives visibles sont conservées dans le détail mobile.

@@ -218,7 +218,7 @@ class LeTrotHistoryParser:
         return category or None
 
     @classmethod
-    def parse_performances(cls, html: str, max_rows: int = 50) -> list[dict[str, Any]]:
+    def parse_performances(cls, html: str, max_rows: int | None = None) -> list[dict[str, Any]]:
         table = cls._performance_table(html)
         if table is None:
             return []
@@ -269,7 +269,7 @@ class LeTrotHistoryParser:
                 "source": "LeTROT",
             }
             rows.append({key: value for key, value in history.items() if value not in (None, "")})
-            if len(rows) >= max_rows:
+            if max_rows is not None and max_rows > 0 and len(rows) >= max_rows:
                 break
         return rows
 
@@ -451,7 +451,7 @@ class GenyHistoryParser(HTMLParser):
                 break
 
     @classmethod
-    def parse(cls, html: str, horse_name: str, max_rows: int = 50) -> tuple[str | None, list[dict[str, Any]]]:
+    def parse(cls, html: str, horse_name: str, max_rows: int | None = None) -> tuple[str | None, list[dict[str, Any]]]:
         parser = cls()
         parser.feed(html)
         if not parser.profile_name:
@@ -488,7 +488,7 @@ class GenyHistoryParser(HTMLParser):
                 "source": "Geny",
             }
             history.append({key: value for key, value in row.items() if value not in (None, "")})
-            if len(history) >= max_rows:
+            if max_rows is not None and max_rows > 0 and len(history) >= max_rows:
                 break
         return parser.profile_name, history
 
@@ -569,7 +569,7 @@ class GenyApiParser:
         cls,
         payload: Any,
         horse_name: str,
-        max_rows: int = 500,
+        max_rows: int | None = None,
     ) -> tuple[str | None, str | None, list[dict[str, Any]]]:
         if not isinstance(payload, dict):
             return None, None, []
@@ -663,7 +663,7 @@ class GenyApiParser:
                 key: value for key, value in row.items() if value not in (None, "", [])
             })
             history.append(clean_row)
-            if len(history) >= max(1, max_rows):
+            if max_rows is not None and max_rows > 0 and len(history) >= max_rows:
                 break
         return profile_name, profile_id, history
 
@@ -712,7 +712,7 @@ class GenyApiParser:
         return participants
 
 
-def _merge_histories(primary: list[dict[str, Any]], complement: list[dict[str, Any]], max_rows: int) -> list[dict[str, Any]]:
+def _merge_histories(primary: list[dict[str, Any]], complement: list[dict[str, Any]], max_rows: int | None) -> list[dict[str, Any]]:
     """Merge objective rows without losing provenance or creating duplicates."""
 
     rows: list[dict[str, Any]] = []
@@ -771,7 +771,8 @@ def _merge_histories(primary: list[dict[str, Any]], complement: list[dict[str, A
         else:
             merge_into(existing, row)
 
-    return sorted(rows, key=lambda item: str(item.get("date") or ""), reverse=True)[:max_rows]
+    ordered = sorted(rows, key=lambda item: str(item.get("date") or ""), reverse=True)
+    return ordered[:max_rows] if max_rows is not None and max_rows > 0 else ordered
 
 
 class OfficialHistoryClient:
@@ -790,7 +791,7 @@ class OfficialHistoryClient:
         geny_enabled: bool = True,
         enabled: bool = True,
         request_interval_seconds: float = 0.35,
-        max_rows: int = 500,
+        max_rows: int = 0,
         history_cache_size: int = 16,
         course_cache_size: int = 128,
         directory_cache_size: int = 4,
@@ -801,10 +802,11 @@ class OfficialHistoryClient:
         self.geny_enabled = geny_enabled
         self.enabled = enabled
         self.request_interval_seconds = max(0.0, request_interval_seconds)
-        self.max_rows = max(1, min(max_rows, 500))
+        requested_rows = int(max_rows)
+        self.max_rows: int | None = requested_rows if requested_rows > 0 else None
         # These caches accelerate repeated reads only; they are not the source of
         # truth. Keep them bounded so a long-lived 512 MB worker cannot retain
-        # every 500-row career and every historical race it has ever fetched.
+        # every full career and every historical race it has ever fetched.
         # Eviction never truncates persisted history or changes analysis depth.
         self.history_cache_size = max(1, int(history_cache_size))
         self.course_cache_size = max(1, int(course_cache_size))

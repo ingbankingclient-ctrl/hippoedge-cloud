@@ -12,8 +12,6 @@ from .providers.base import RacingProvider
 from .utils import parse_iso_or_local, parse_record_to_seconds, sanitize_objective_payload, to_float, to_int
 
 
-HISTORY_STORAGE_LIMIT = 500
-
 
 def _first(d: dict, keys: Iterable[str], default=None):
     for k in keys:
@@ -234,7 +232,7 @@ class ImportService:
                     .order_by(Runner.id.desc())
                 )
                 if cached is not None and cached.history:
-                    for old in cached.history[:HISTORY_STORAGE_LIMIT]:
+                    for old in cached.history:
                         runner.history.append(HorseHistory(
                             race_date=old.race_date,track=old.track,race_code=old.race_code,
                             discipline=old.discipline,distance_m=old.distance_m,going=old.going,
@@ -308,7 +306,7 @@ class ImportService:
             ).append(item)
         seen_exact: set[str] = set()
         seen_without_id: set[tuple[str, str, int | None]] = set()
-        for h in rows[:HISTORY_STORAGE_LIMIT]:
+        for h in rows:
             ds=str(_first(h,["date","date_course","race_date"],""))[:10]
             try: d=date.fromisoformat(ds)
             except Exception:
