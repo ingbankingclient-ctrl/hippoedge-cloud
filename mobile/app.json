@@ -1,0 +1,19 @@
+{
+  "expo": {
+    "name": "HippoEdge",
+    "slug": "hippoedge",
+    "version": "1.7.0",
+    "orientation": "portrait",
+    "userInterfaceStyle": "dark",
+    "backgroundColor": "#07090E",
+    "ios": {"supportsTablet": true, "bundleIdentifier": "com.hippoedge.app"},
+    "android": {"package": "com.hippoedge.app"},
+    "web": {
+      "bundler": "metro",
+      "output": "single",
+      "name": "HippoEdge",
+      "shortName": "HippoEdge",
+      "description": "Analyses hippiques indépendantes et factuelles"
+    }
+  }
+}
