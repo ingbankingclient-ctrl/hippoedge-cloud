@@ -53,6 +53,9 @@ def provider_factory():
             official_history_enabled=settings.official_history_enabled,
             history_request_interval_seconds=settings.history_request_interval_seconds,
             history_max_rows=settings.history_max_rows,
+            history_cache_size=settings.history_cache_size,
+            history_course_cache_size=settings.history_course_cache_size,
+            history_directory_cache_size=settings.history_directory_cache_size,
         )
     if settings.provider.lower()=="turfbzh":
         return TurfBzhProvider(settings.turfbzh_base_url, settings.turfbzh_api_key)
@@ -116,18 +119,21 @@ async def _enrich_geny_course_details(day: date, write_lock: asyncio.Lock, provi
 
     db = SessionLocal()
     try:
-        histories = db.scalars(
-            select(HorseHistory)
+        # Read only the three columns needed to plan the batch. Loading every
+        # HorseHistory ORM object also loaded its potentially large opponents
+        # JSON, which could retain an entire day's careers in RAM before the
+        # first historical-course request was made.
+        history_rows = db.execute(
+            select(HorseHistory.id, HorseHistory.race_date, HorseHistory.raw)
             .join(Runner)
             .join(Race)
             .join(Meeting)
             .where(Meeting.race_date == day)
-            .options(selectinload(HorseHistory.runner))
         ).all()
         grouped: dict[str, list[int]] = {}
         dates: dict[str, date] = {}
-        for history in histories:
-            raw = history.raw if isinstance(history.raw, dict) else {}
+        for history_id, history_date, history_raw in history_rows:
+            raw = history_raw if isinstance(history_raw, dict) else {}
             course_id = str(raw.get("geny_course_id") or "").strip()
             if not course_id.isdigit():
                 continue
@@ -135,8 +141,8 @@ async def _enrich_geny_course_details(day: date, write_lock: asyncio.Lock, provi
             attempts = int(raw.get("geny_course_lookup_attempts") or 0)
             if status == "ok" or status in {"no_participants", "identity_mismatch"} or attempts >= 3:
                 continue
-            grouped.setdefault(course_id, []).append(history.id)
-            dates[course_id] = max(dates.get(course_id, history.race_date), history.race_date)
+            grouped.setdefault(course_id, []).append(history_id)
+            dates[course_id] = max(dates.get(course_id, history_date), history_date)
     finally:
         db.close()
 
@@ -252,16 +258,37 @@ async def _enrich_geny_course_details(day: date, write_lock: asyncio.Lock, provi
                 db.close()
 
     async with write_lock:
+        # Finalize one horse at a time, then analyse one race at a time.  The
+        # former all-day query retained every runner career plus every old
+        # snapshot/score in the same SQLAlchemy identity map.  This preserves
+        # the complete 500-row histories and A→B→C→D method while bounding the
+        # working set to one horse/race.
         db = SessionLocal()
         try:
-            runners = db.scalars(
-                select(Runner)
+            runner_ids = db.scalars(
+                select(Runner.id)
                 .join(Race)
                 .join(Meeting)
                 .where(Meeting.race_date == day)
-                .options(selectinload(Runner.history))
             ).all()
-            for runner in runners:
+            race_ids = db.scalars(
+                select(Race.id)
+                .join(Meeting)
+                .where(Meeting.race_date == day)
+            ).all()
+        finally:
+            db.close()
+
+        for runner_id in runner_ids:
+            db = SessionLocal()
+            try:
+                runner = db.scalar(
+                    select(Runner)
+                    .where(Runner.id == runner_id)
+                    .options(selectinload(Runner.history))
+                )
+                if runner is None:
+                    continue
                 geny_rows = [
                     row for row in runner.history
                     if isinstance(row.raw, dict) and str(row.raw.get("geny_course_id") or "").isdigit()
@@ -293,27 +320,33 @@ async def _enrich_geny_course_details(day: date, write_lock: asyncio.Lock, provi
                 else:
                     updated.pop("opponent_enrichment_version", None)
                 runner.raw = updated
-            db.commit()
+                db.commit()
+            except Exception:
+                db.rollback()
+                raise
+            finally:
+                db.close()
 
-            races = db.scalars(
-                select(Race)
-                .join(Meeting)
-                .where(Meeting.race_date == day)
-                .options(
-                    selectinload(Race.meeting),
-                    selectinload(Race.runners).selectinload(Runner.history),
-                    selectinload(Race.snapshots).selectinload(AnalysisSnapshot.scores),
-                    selectinload(Race.result),
+        for race_id in race_ids:
+            db = SessionLocal()
+            try:
+                race = db.scalar(
+                    select(Race)
+                    .where(Race.id == race_id)
+                    .options(
+                        selectinload(Race.meeting),
+                        selectinload(Race.runners).selectinload(Runner.history),
+                        selectinload(Race.snapshots),
+                        selectinload(Race.result),
+                    )
                 )
-            ).all()
-            for race in races:
-                if race.result is None:
+                if race is not None and race.result is None:
                     generate_analysis(db, race)
-        except Exception:
-            db.rollback()
-            raise
-        finally:
-            db.close()
+            except Exception:
+                db.rollback()
+                raise
+            finally:
+                db.close()
     return pending_after_batch
 
 
@@ -348,7 +381,7 @@ async def _enrich_day_histories(day: date, write_lock: asyncio.Lock) -> bool:
             .join(Race)
             .join(Meeting)
             .where(Meeting.race_date == day)
-            .options(selectinload(Runner.history), selectinload(Runner.race))
+            .options(selectinload(Runner.race))
         ).all()
         jobs = []
         for runner in rows:
@@ -523,6 +556,7 @@ async def _enrich_day_histories(day: date, write_lock: asyncio.Lock) -> bool:
                     db.close()
             continue
 
+        imported = 0
         async with write_lock:
             db = SessionLocal()
             try:
@@ -531,21 +565,32 @@ async def _enrich_day_histories(day: date, write_lock: asyncio.Lock) -> bool:
                     .where(Runner.id == runner_id)
                     .options(selectinload(Runner.history))
                 )
-                if runner is None:
-                    continue
-                imported = importer._replace_history(db, runner, payload)
-                meta = payload.get("meta", {}) if isinstance(payload, dict) else {}
-                runner.raw = {
-                    **(runner.raw or {}),
-                    "history_source": _source_label((runner.raw or {}).get("history_source"), meta.get("source")),
-                    "history_status": "ok" if imported else (meta.get("status") or "history_incomplete"),
-                    "history_rows": imported,
-                    "history_checked_at": datetime.now().isoformat(),
-                    "history_last_error": None,
-                    "history_enrichment_version": HISTORY_ENRICHMENT_VERSION,
-                }
-                db.commit()
-                if imported:
+                if runner is not None:
+                    imported = importer._replace_history(db, runner, payload)
+                    meta = payload.get("meta", {}) if isinstance(payload, dict) else {}
+                    runner.raw = {
+                        **(runner.raw or {}),
+                        "history_source": _source_label((runner.raw or {}).get("history_source"), meta.get("source")),
+                        "history_status": "ok" if imported else (meta.get("status") or "history_incomplete"),
+                        "history_rows": imported,
+                        "history_checked_at": datetime.now().isoformat(),
+                        "history_last_error": None,
+                        "history_enrichment_version": HISTORY_ENRICHMENT_VERSION,
+                    }
+                    db.commit()
+            except Exception:
+                db.rollback()
+                raise
+            finally:
+                db.close()
+
+        # Release the 500-row provider payload before loading the complete field
+        # for scoring. Persisted rows are now the source of truth.
+        payload = None
+        if imported:
+            async with write_lock:
+                db = SessionLocal()
+                try:
                     race = db.scalar(
                         select(Race)
                         .where(Race.id == race_id)
@@ -558,11 +603,11 @@ async def _enrich_day_histories(day: date, write_lock: asyncio.Lock) -> bool:
                     )
                     if race is not None and race.result is None:
                         generate_analysis(db, race)
-            except Exception:
-                db.rollback()
-                raise
-            finally:
-                db.close()
+                except Exception:
+                    db.rollback()
+                    raise
+                finally:
+                    db.close()
 
     return await _enrich_geny_course_details(day, write_lock, provider)
 
@@ -610,25 +655,55 @@ async def maintenance_loop(
                 try: await importer.import_results(db,today)
                 except Exception as e:
                     db.rollback(); print("results warning",e)
-                races=db.scalars(select(Race).options(selectinload(Race.runners).selectinload(Runner.history),selectinload(Race.meeting),selectinload(Race.snapshots),selectinload(Race.result))).all()
+                # Maintenance promises current day + J+1.  Do not load every
+                # race ever stored in the database with all 500-row histories.
+                # Process one relevant race at a time and release its ORM graph
+                # before opening the next one.
+                race_rows = db.execute(
+                    select(Race.id, Race.scheduled_at)
+                    .join(Meeting)
+                    .where(Meeting.race_date.in_([today, tomorrow]))
+                ).all()
                 now=datetime.now()
-                for race in races:
-                    # Results stop the analysis lifecycle. A provisional order is
-                    # displayed but cannot trigger a new post-start snapshot.
-                    if race.result is not None:
-                        if race.result.status == "official":
-                            evaluate_locked_snapshots(db,race)
+                upcoming: list[datetime] = []
+                for race_id, _scheduled_at in race_rows:
+                    race = db.scalar(
+                        select(Race)
+                        .where(Race.id == race_id)
+                        .options(
+                            selectinload(Race.runners).selectinload(Runner.history),
+                            selectinload(Race.meeting),
+                            selectinload(Race.snapshots),
+                            selectinload(Race.result),
+                        )
+                    )
+                    if race is None:
+                        db.expunge_all()
                         continue
-                    # Generate current/J+1 snapshots. Only a future race may be
-                    # frozen as the immutable pre-race record.
-                    try: generate_analysis(db,race)
-                    except Exception as e:
-                        db.rollback(); print("analysis warning",race.id,e); continue
-                    if now < race.scheduled_at <= now + timedelta(minutes=settings.auto_lock_minutes_before):
-                        try: lock_latest_snapshot(db,race)
+                    try:
+                        # Results stop the analysis lifecycle. A provisional order is
+                        # displayed but cannot trigger a new post-start snapshot.
+                        if race.result is not None:
+                            if race.result.status == "official":
+                                evaluate_locked_snapshots(db,race)
+                            continue
+                        if race.scheduled_at > now:
+                            upcoming.append(race.scheduled_at)
+                        # Generate current/J+1 snapshots. Only a future race may be
+                        # frozen as the immutable pre-race record.
+                        try:
+                            generate_analysis(db,race)
                         except Exception as e:
-                            db.rollback(); print("lock warning",race.id,e)
-                upcoming = [r.scheduled_at for r in races if r.result is None and r.scheduled_at > now]
+                            db.rollback(); print("analysis warning",race.id,e); continue
+                        if now < race.scheduled_at <= now + timedelta(minutes=settings.auto_lock_minutes_before):
+                            try: lock_latest_snapshot(db,race)
+                            except Exception as e:
+                                db.rollback(); print("lock warning",race.id,e)
+                    finally:
+                        # Commit/refresh inside analysis may expire objects, but
+                        # expunge_all still guarantees that the next race starts
+                        # with a clean identity map.
+                        db.expunge_all()
                 if upcoming:
                     until_lock = (min(upcoming) - now).total_seconds() - settings.auto_lock_minutes_before * 60
                     next_wake = min(next_wake, max(1.0, until_lock))
@@ -706,17 +781,36 @@ async def refresh(request: Request, day: date=Query(default_factory=date.today),
             try: await importer.import_results(db,day)
             except Exception as e:
                 db.rollback(); print("results warning",day,e)
-        for meeting in meetings:
-            for race in meeting.races:
+        meeting_count = len(meetings)
+        race_ids = db.scalars(
+            select(Race.id).join(Meeting).where(Meeting.race_date == day)
+        ).all()
+        # import_day leaves all programme objects attached to this session. Drop
+        # them before complete careers are loaded, then analyse one race at a
+        # time so a manual refresh cannot accumulate a whole day in RAM.
+        db.expunge_all()
+        for race_id in race_ids:
+            race = db.scalar(
+                select(Race)
+                .where(Race.id == race_id)
+                .options(
+                    selectinload(Race.meeting),
+                    selectinload(Race.runners).selectinload(Runner.history),
+                    selectinload(Race.snapshots),
+                    selectinload(Race.result),
+                )
+            )
+            if race is not None:
                 # A locked pre-race snapshot is immutable; after an arrival we
                 # only expose that snapshot and never recalculate it in place.
                 generate_analysis(db,race)
+            db.expunge_all()
         _schedule_history_enrichment(
             day,
             request.app.state.db_write_lock,
             getattr(request.app.state, "history_tasks", {}),
         )
-    return {"ok":True,"date":day,"meetings":len(meetings)}
+    return {"ok":True,"date":day,"meetings":meeting_count}
 
 
 @app.get("/api/program/{day}",response_model=list[MeetingOut])
@@ -738,7 +832,6 @@ def tomorrow(db: Session=Depends(get_db)):
 def day_selections(day: date, db: Session=Depends(get_db)):
     meetings=db.scalars(
         select(Meeting).where(Meeting.race_date==day).options(
-            selectinload(Meeting.races).selectinload(Race.runners).selectinload(Runner.history),
             selectinload(Meeting.races).selectinload(Race.snapshots),
         ).order_by(Meeting.code)
     ).all()
@@ -859,37 +952,52 @@ def day_selections(day: date, db: Session=Depends(get_db)):
 @app.get("/api/day/{day}/history-status")
 def history_status(day: date, db: Session=Depends(get_db)):
     """Report persisted ingestion progress without treating music as history."""
-    runners=db.scalars(
-        select(Runner).join(Race).join(Meeting)
-        .where(Meeting.race_date==day)
-        .options(selectinload(Runner.history))
+    runner_rows = db.execute(
+        select(Runner.id, Runner.raw)
+        .join(Race)
+        .join(Meeting)
+        .where(Meeting.race_date == day)
     ).all()
     statuses: dict[str,int]={}
     sources: dict[str,int]={}
+    history_counts: dict[int, int] = {runner_id: 0 for runner_id, _raw in runner_rows}
     detailed=selection_ready=attempts=0
     geny_course_rows=geny_course_linked=geny_course_pending=0
-    for runner in runners:
-        raw=runner.raw if isinstance(runner.raw,dict) else {}
+
+    # Only raw lookup metadata is needed here. Do not materialize HorseHistory
+    # ORM rows (and their large opponents JSON) just to count ingestion status.
+    history_result = db.execute(
+        select(HorseHistory.runner_id, HorseHistory.raw)
+        .join(Runner)
+        .join(Race)
+        .join(Meeting)
+        .where(Meeting.race_date == day)
+        .execution_options(yield_per=1000)
+    )
+    for runner_id, history_raw_value in history_result:
+        history_counts[runner_id] = history_counts.get(runner_id, 0) + 1
+        history_raw=history_raw_value if isinstance(history_raw_value,dict) else {}
+        if str(history_raw.get("geny_course_id") or "").isdigit():
+            geny_course_rows+=1
+            lookup_status=str(history_raw.get("geny_course_lookup_status") or "")
+            geny_course_linked+=int(lookup_status=="ok")
+            terminal=(
+                lookup_status in {"no_participants","identity_mismatch"}
+                or int(history_raw.get("geny_course_lookup_attempts") or 0)>=3
+            )
+            geny_course_pending+=int(lookup_status!="ok" and not terminal)
+
+    for runner_id, runner_raw_value in runner_rows:
+        raw=runner_raw_value if isinstance(runner_raw_value,dict) else {}
         status=str(raw.get("history_status") or "pending")
         statuses[status]=statuses.get(status,0)+1
         source=str(raw.get("history_source") or "non renseignée")
         sources[source]=sources.get(source,0)+1
-        rows=len(runner.history)
+        rows=history_counts.get(runner_id,0)
         detailed+=int(rows>0)
         selection_ready+=int(rows>=settings.selection_min_history_rows)
         attempts+=int(raw.get("history_attempts") or 0)
-        for history in runner.history:
-            history_raw=history.raw if isinstance(history.raw,dict) else {}
-            if str(history_raw.get("geny_course_id") or "").isdigit():
-                geny_course_rows+=1
-                lookup_status=str(history_raw.get("geny_course_lookup_status") or "")
-                geny_course_linked+=int(lookup_status=="ok")
-                terminal=(
-                    lookup_status in {"no_participants","identity_mismatch"}
-                    or int(history_raw.get("geny_course_lookup_attempts") or 0)>=3
-                )
-                geny_course_pending+=int(lookup_status!="ok" and not terminal)
-    total=len(runners)
+    total=len(runner_rows)
     return {
         "date":day.isoformat(),"total_horses":total,
         "horses_with_detailed_history":detailed,
@@ -910,7 +1018,7 @@ def history_status(day: date, db: Session=Depends(get_db)):
 @app.get("/api/races/{race_id}/analysis",response_model=AnalysisOut)
 async def analysis(request:Request, race_id:int, force:bool=False, db: Session=Depends(get_db)):
     async with request.app.state.db_write_lock:
-        race=db.scalar(select(Race).where(Race.id==race_id).options(selectinload(Race.meeting),selectinload(Race.runners).selectinload(Runner.history),selectinload(Race.snapshots).selectinload(AnalysisSnapshot.scores)))
+        race=db.scalar(select(Race).where(Race.id==race_id).options(selectinload(Race.meeting),selectinload(Race.runners).selectinload(Runner.history),selectinload(Race.snapshots)))
         if not race: raise HTTPException(404,"Course introuvable")
         current=[s for s in race.snapshots if s.methodology_version==settings.methodology_version]
         latest=max(current,key=lambda x:x.generated_at) if current else None

@@ -98,6 +98,9 @@ class PmuProvider(RacingProvider):
         official_history_enabled: bool = True,
         history_request_interval_seconds: float = 0.35,
         history_max_rows: int = 500,
+        history_cache_size: int = 16,
+        history_course_cache_size: int = 128,
+        history_directory_cache_size: int = 4,
     ):
         self.base_url = base_url.rstrip("/")
         self.history_client = OfficialHistoryClient(
@@ -108,6 +111,9 @@ class PmuProvider(RacingProvider):
             enabled=official_history_enabled,
             request_interval_seconds=history_request_interval_seconds,
             max_rows=history_max_rows,
+            history_cache_size=history_cache_size,
+            course_cache_size=history_course_cache_size,
+            directory_cache_size=history_directory_cache_size,
         )
 
     async def _get(self, path: str, params: dict[str, Any] | None = None) -> dict[str, Any]:

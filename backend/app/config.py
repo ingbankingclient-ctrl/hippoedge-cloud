@@ -18,6 +18,10 @@ class Settings(BaseSettings):
     official_history_enabled: bool = True
     history_request_interval_seconds: float = 0.35
     history_max_rows: int = 500
+    # Bound only in-memory provider caches; persisted histories remain complete.
+    history_cache_size: int = 16
+    history_course_cache_size: int = 128
+    history_directory_cache_size: int = 4
     history_course_batch_size: int = 120
     selection_min_history_rows: int = 3
     selection_min_field_coverage_percent: int = 70

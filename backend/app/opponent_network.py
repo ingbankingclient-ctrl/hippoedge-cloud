@@ -38,7 +38,7 @@ def _known_non_place(status: str | None, disqualified: bool) -> bool:
     return any(token in text for token in ("NON_PLACE", "NON PLACE", "DISQUAL", "DISTANC", "ARRET", "TOMBE"))
 
 
-@dataclass
+@dataclass(slots=True)
 class _Observation:
     name: str
     label: str
@@ -51,7 +51,7 @@ class _Observation:
         return self.position is not None or _known_non_place(self.status, self.disqualified)
 
 
-@dataclass
+@dataclass(slots=True)
 class _Event:
     key: tuple[str, str, str, int | None]
     race_date: date
@@ -81,17 +81,27 @@ class _Event:
         return 20000.0
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class _Duel:
     winner: str
     loser: str
-    event_key: tuple[str, str, str, int | None]
-    race_date: date
-    level: float
+    event: _Event
     weight: float
 
+    @property
+    def event_key(self) -> tuple[str, str, str, int | None]:
+        return self.event.key
 
-@dataclass
+    @property
+    def race_date(self) -> date:
+        return self.event.race_date
+
+    @property
+    def level(self) -> float:
+        return self.event.level
+
+
+@dataclass(slots=True)
 class OpponentNetworkCard:
     score: float
     eligible: bool
@@ -251,9 +261,9 @@ def _duels(events: dict[tuple[str, str, str, int | None], _Event], today: date) 
             for right in observations[index + 1:]:
                 result = _pair_result(left, right)
                 if result > 0:
-                    duels.append(_Duel(left.name, right.name, event.key, event.race_date, event.level, weight))
+                    duels.append(_Duel(left.name, right.name, event, weight))
                 elif result < 0:
-                    duels.append(_Duel(right.name, left.name, event.key, event.race_date, event.level, weight))
+                    duels.append(_Duel(right.name, left.name, event, weight))
     return duels
 
 
@@ -301,6 +311,26 @@ def build_opponent_network(race: Race, runners: list[Runner]) -> dict[int, Oppon
         by_winner.setdefault(duel.winner, []).append(duel)
         by_loser.setdefault(duel.loser, []).append(duel)
 
+    # The original chain search repeatedly scanned every historical event for
+    # each win/second/third edge. With complete careers this became effectively
+    # quadratic-to-cubic CPU work. Index only successful later appearances once;
+    # the exact confirmation criteria remain unchanged.
+    successful_events_by_horse: dict[str, list[_Event]] = {}
+    latest_success_date: dict[str, date] = {}
+    for event in events.values():
+        for horse_name, observation in event.observations.items():
+            if observation.position is None or observation.position > 3:
+                continue
+            successful_events_by_horse.setdefault(horse_name, []).append(event)
+            previous = latest_success_date.get(horse_name)
+            if previous is None or event.race_date > previous:
+                latest_success_date[horse_name] = event.race_date
+
+    # The central list is no longer needed after Elo and adjacency indexes have
+    # been built. Duel objects stay alive only through the two directional
+    # indexes used by the graph.
+    del duels
+
     event_by_key = events
     output: dict[int, OpponentNetworkCard] = {}
     for runner in active:
@@ -323,66 +353,93 @@ def build_opponent_network(race: Race, runners: list[Runner]) -> dict[int, Oppon
         direct_component = 50 + direct_balance * 34
 
         confirmations: list[tuple[float, _Duel, _Event, bool, bool]] = []
-        chains: set[tuple[str, str, tuple[str, str, str, int | None]]] = set()
-        third_degree_chains: set[
-            tuple[
-                str,
-                str,
-                str,
-                tuple[str, str, str, int | None],
-                tuple[str, str, str, int | None],
-            ]
-        ] = set()
+        second_degree_count = 0
+        third_degree_count = 0
+        # Only three A→B→C→D examples are rendered. Keep those three newest
+        # records instead of retaining every chain tuple in RAM. Counts remain
+        # exact; the graph depth and qualification rules are unchanged.
+        newest_third_degree: list[
+            tuple[date, date, str, str, str, tuple[str, str, str, int | None], tuple[str, str, str, int | None]]
+        ] = []
+
+        # Multiple historical wins against the same beaten horse used to repeat
+        # the exact same second/third-degree search once per original meeting.
+        # Group them by B first. A chain exists when *any* qualifying A>B line
+        # validates it, which is exactly what the old set-deduplication produced.
+        wins_by_loser: dict[str, list[_Duel]] = {}
         for win in wins:
-            later_events = [
-                event for event in events.values()
-                if event.race_date > win.race_date and win.loser in event.observations
-            ]
-            for later in later_events:
-                later_win, later_place = _event_finish(later, win.loser)
-                if not (later_win or later_place):
+            wins_by_loser.setdefault(win.loser, []).append(win)
+
+        for beaten_name, original_wins in wins_by_loser.items():
+            # Confirmations are ultimately deduplicated by (B, later event).
+            # Compute the strongest admissible original line directly instead of
+            # appending the same later event once for every A>B meeting.
+            for later in successful_events_by_horse.get(beaten_name, []):
+                eligible_originals = [
+                    original for original in original_wins
+                    if later.race_date > original.race_date
+                ]
+                if not eligible_originals:
                     continue
-                same_or_higher = later.level >= win.level * 0.90
-                signal = 1.0 if later_win and same_or_higher else 0.82 if later_place and same_or_higher else 0.72 if later_win else 0.55
-                confirmations.append((signal, win, later, later_win, same_or_higher))
-            for second in by_winner.get(win.loser, []):
-                if second.race_date <= win.race_date or second.loser == name:
-                    continue
-                later_proof = any(
-                    event.race_date > second.race_date
-                    and second.loser in event.observations
-                    and any(_event_finish(event, second.loser))
-                    for event in events.values()
+                later_win, later_place = _event_finish(later, beaten_name)
+
+                def confirmation_tuple(original: _Duel) -> tuple[float, _Duel, _Event, bool, bool]:
+                    same_or_higher = later.level >= original.level * 0.90
+                    signal = (
+                        1.0 if later_win and same_or_higher
+                        else 0.82 if later_place and same_or_higher
+                        else 0.72 if later_win
+                        else 0.55
+                    )
+                    return (signal, original, later, later_win, same_or_higher)
+
+                best = max(
+                    (confirmation_tuple(original) for original in eligible_originals),
+                    key=lambda item: item[0],
                 )
-                if later_proof or second.level >= win.level * 0.90:
-                    chains.add((win.loser, second.loser, second.event_key))
+                confirmations.append(best)
+
+            for second in by_winner.get(beaten_name, []):
+                if second.loser == name:
+                    continue
+                eligible_originals = [
+                    original for original in original_wins
+                    if second.race_date > original.race_date
+                ]
+                if not eligible_originals:
+                    continue
+                later_proof = (
+                    latest_success_date.get(second.loser) is not None
+                    and latest_success_date[second.loser] > second.race_date
+                )
+                if later_proof or any(
+                    second.level >= original.level * 0.90 for original in eligible_originals
+                ):
+                    second_degree_count += 1
                     for third in by_winner.get(second.loser, []):
                         if (
                             third.race_date <= second.race_date
-                            or third.loser in {name, win.loser}
+                            or third.loser in {name, beaten_name}
                         ):
                             continue
-                        terminal_proof = any(
-                            event.race_date > third.race_date
-                            and third.loser in event.observations
-                            and any(_event_finish(event, third.loser))
-                            for event in events.values()
+                        terminal_proof = (
+                            latest_success_date.get(third.loser) is not None
+                            and latest_success_date[third.loser] > third.race_date
                         )
                         if terminal_proof or third.level >= second.level * 0.90:
-                            third_degree_chains.add((
-                                win.loser,
-                                second.loser,
-                                third.loser,
-                                second.event_key,
-                                third.event_key,
-                            ))
+                            third_degree_count += 1
+                            record = (
+                                third.race_date, second.race_date, beaten_name,
+                                second.loser, third.loser, second.event_key, third.event_key,
+                            )
+                            newest_third_degree.append(record)
+                            if len(newest_third_degree) > 3:
+                                newest_third_degree.sort(key=lambda item: (item[0], item[1]), reverse=True)
+                                del newest_third_degree[3:]
 
-        unique_confirmations: dict[tuple[str, tuple[str, str, str, int | None]], tuple[float, _Duel, _Event, bool, bool]] = {}
-        for item in confirmations:
-            key = (item[1].loser, item[2].key)
-            if key not in unique_confirmations or item[0] > unique_confirmations[key][0]:
-                unique_confirmations[key] = item
-        confirmation_rows = list(unique_confirmations.values())
+        # Grouping already makes these keys unique. Keep the same row shape used
+        # by the scoring/explanation code below.
+        confirmation_rows = confirmations
         confirmed_lines = len(confirmation_rows)
         higher_confirmations = sum(1 for item in confirmation_rows if item[4])
         confirmation_component = 50 + (sum(item[0] for item in confirmation_rows) / max(1, len(wins))) * 34
@@ -390,7 +447,7 @@ def build_opponent_network(race: Race, runners: list[Runner]) -> dict[int, Oppon
         # A third-degree relation is useful context but receives less than half
         # the contribution of a second-degree relation. It can never alter the
         # main Performance/Placé scores because this component lives only here.
-        indirect_component = 50 + min(30, len(chains) * 4.5 + len(third_degree_chains) * 2.0)
+        indirect_component = 50 + min(30, second_degree_count * 4.5 + third_degree_count * 2.0)
 
         current_duels = [duel for duel in [*wins, *losses] if (duel.loser if duel.winner == name else duel.winner) in current_set]
         current_wins = sum(1 for duel in current_duels if duel.winner == name)
@@ -458,9 +515,9 @@ def build_opponent_network(race: Race, runners: list[Runner]) -> dict[int, Oppon
                 break
 
         chain_examples: list[str] = []
-        for first_name, second_name, third_name, second_key, third_key in sorted(
-            third_degree_chains,
-            key=lambda item: (event_by_key[item[4]].race_date, event_by_key[item[3]].race_date),
+        for _third_date, _second_date, first_name, second_name, third_name, second_key, third_key in sorted(
+            newest_third_degree,
+            key=lambda item: (item[0], item[1]),
             reverse=True,
         ):
             second_event = event_by_key[second_key]
@@ -518,10 +575,10 @@ def build_opponent_network(race: Race, runners: list[Runner]) -> dict[int, Oppon
                 if confirmed_lines else
                 " Aucun adversaire battu n’a encore fourni de confirmation positive visible dans les courses reliées."
             )
-            if chains or third_degree_chains:
+            if second_degree_count or third_degree_count:
                 chain_text = (
-                    f" {len(chains)} chaîne{'s' if len(chains) != 1 else ''} A→B→C et "
-                    f"{len(third_degree_chains)} chaîne{'s' if len(third_degree_chains) != 1 else ''} "
+                    f" {second_degree_count} chaîne{'s' if second_degree_count != 1 else ''} A→B→C et "
+                    f"{third_degree_count} chaîne{'s' if third_degree_count != 1 else ''} "
                     "A→B→C→D ont été retrouvées avec une influence décroissante à chaque liaison."
                 )
             else:
@@ -570,9 +627,9 @@ def build_opponent_network(race: Race, runners: list[Runner]) -> dict[int, Oppon
             direct_wins=len(wins),
             confirmed_lines=confirmed_lines,
             higher_or_equal_confirmations=higher_confirmations,
-            indirect_chains=len(chains) + len(third_degree_chains),
-            second_degree_chains=len(chains),
-            third_degree_chains=len(third_degree_chains),
+            indirect_chains=second_degree_count + third_degree_count,
+            second_degree_chains=second_degree_count,
+            third_degree_chains=third_degree_count,
             previous_meetings_today=len({
                 (duel.loser if duel.winner == name else duel.winner)
                 for duel in current_duels

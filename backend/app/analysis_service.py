@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import datetime
+import hashlib
 from sqlalchemy import select
 from sqlalchemy.orm import Session, selectinload
 
@@ -38,45 +39,59 @@ def load_race(db: Session, race_id: int) -> Race | None:
         select(Race).where(Race.id==race_id).options(
             selectinload(Race.meeting),
             selectinload(Race.runners).selectinload(Runner.history),
-            selectinload(Race.snapshots).selectinload(AnalysisSnapshot.scores),
+            selectinload(Race.snapshots),
         )
     )
 
 
 def generate_analysis(db: Session, race: Race, lock: bool = False) -> AnalysisSnapshot:
     settings=get_settings()
-    data_fingerprint={
-        "methodology_version":settings.methodology_version,
+    # Compute the fingerprint incrementally.  The previous implementation built
+    # a second, giant nested copy of every horse career (including every
+    # opponents JSON list) and then json.dumps() duplicated it once more.  On a
+    # 512 MB worker that transient copy could be larger than the analysis itself.
+    # Incremental hashing keeps exactly the same factual sensitivity without
+    # retaining a duplicate of the complete field in memory.
+    digest = hashlib.sha256()
+
+    def feed(payload: object) -> None:
+        digest.update(stable_hash(payload).encode("ascii"))
+        digest.update(b"\0")
+
+    feed({
+        "methodology_version": settings.methodology_version,
         "race": {
-            "id":race.id,"going":race.going,"surface":race.surface,"distance":race.distance_m,
-            "discipline":race.discipline,"class":race.class_name,"purse":race.purse_eur,
-            "start":race.start_type,
+            "id": race.id, "going": race.going, "surface": race.surface,
+            "distance": race.distance_m, "discipline": race.discipline,
+            "class": race.class_name, "purse": race.purse_eur, "start": race.start_type,
         },
-        "runners": [
-            {
-                "n":r.number,"name":r.horse_name,"scratched":r.scratched,"age":r.age,"sex":r.sex,
-                "weight":r.weight_kg,"draw":r.draw,"handicap_value":r.handicap_value,
-                "earnings":r.earnings_eur,"record":r.record_km_seconds,"ferrure":r.ferrure,
-                "equipment":r.equipment,"start_position":r.start_position,"distance":r.distance_m,
-                "jockey_driver":r.jockey_driver,"trainer":r.trainer,"recent_form":r.recent_form,
-                "history_status":(r.raw or {}).get("history_status") if isinstance(r.raw,dict) else None,
-                "history_source":(r.raw or {}).get("history_source") if isinstance(r.raw,dict) else None,
-                "history":[
-                    {
-                        "d":h.race_date.isoformat(),"track":h.track,"code":h.race_code,
-                        "discipline":h.discipline,"dist":h.distance_m,"going":h.going,
-                        "p":h.position,"dq":h.disqualified,"t":h.chrono_km_seconds,
-                        "class":h.class_name,"weight":h.weight_kg,"draw":h.draw,
-                        "start":h.start_type,"equipment":h.equipment,"field":h.field_size,
-                        "margin":h.margin_to_winner,"opponents":h.opponents,
-                    }
-                    for h in r.history
-                ],
-            }
-            for r in race.runners
-        ]
-    }
-    dh=stable_hash(data_fingerprint)
+    })
+    for r in sorted(race.runners, key=lambda item: (item.number, item.id or 0)):
+        feed({
+            "n": r.number, "name": r.horse_name, "scratched": r.scratched,
+            "age": r.age, "sex": r.sex, "weight": r.weight_kg, "draw": r.draw,
+            "handicap_value": r.handicap_value, "earnings": r.earnings_eur,
+            "record": r.record_km_seconds, "ferrure": r.ferrure,
+            "equipment": r.equipment, "start_position": r.start_position,
+            "distance": r.distance_m, "jockey_driver": r.jockey_driver,
+            "trainer": r.trainer, "recent_form": r.recent_form,
+            "history_status": (r.raw or {}).get("history_status") if isinstance(r.raw, dict) else None,
+            "history_source": (r.raw or {}).get("history_source") if isinstance(r.raw, dict) else None,
+        })
+        for h in sorted(
+            r.history,
+            key=lambda item: (item.race_date, item.id or 0),
+            reverse=True,
+        ):
+            feed({
+                "d": h.race_date.isoformat(), "track": h.track, "code": h.race_code,
+                "discipline": h.discipline, "dist": h.distance_m, "going": h.going,
+                "p": h.position, "dq": h.disqualified, "t": h.chrono_km_seconds,
+                "class": h.class_name, "weight": h.weight_kg, "draw": h.draw,
+                "start": h.start_type, "equipment": h.equipment, "field": h.field_size,
+                "margin": h.margin_to_winner, "opponents": h.opponents,
+            })
+    dh = digest.hexdigest()
     latest=max(race.snapshots,key=lambda x:x.generated_at) if race.snapshots else None
     if race.result is not None:
         # Preserve the best available pre-race reading even when a provider

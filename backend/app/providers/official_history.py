@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+from collections import OrderedDict
 import re
 import time
 import unicodedata
@@ -790,6 +791,9 @@ class OfficialHistoryClient:
         enabled: bool = True,
         request_interval_seconds: float = 0.35,
         max_rows: int = 500,
+        history_cache_size: int = 16,
+        course_cache_size: int = 128,
+        directory_cache_size: int = 4,
     ):
         self.letrot_base_url = letrot_base_url.rstrip("/")
         self.france_galop_base_url = france_galop_base_url.rstrip("/")
@@ -798,12 +802,33 @@ class OfficialHistoryClient:
         self.enabled = enabled
         self.request_interval_seconds = max(0.0, request_interval_seconds)
         self.max_rows = max(1, min(max_rows, 500))
-        self._cache: dict[tuple[str, str], dict[str, Any]] = {}
-        self._geny_course_cache: dict[str, dict[str, Any]] = {}
-        self._geny_directory_cache: dict[str, str] = {}
+        # These caches accelerate repeated reads only; they are not the source of
+        # truth. Keep them bounded so a long-lived 512 MB worker cannot retain
+        # every 500-row career and every historical race it has ever fetched.
+        # Eviction never truncates persisted history or changes analysis depth.
+        self.history_cache_size = max(1, int(history_cache_size))
+        self.course_cache_size = max(1, int(course_cache_size))
+        self.directory_cache_size = max(1, int(directory_cache_size))
+        self._cache: OrderedDict[tuple[str, str], dict[str, Any]] = OrderedDict()
+        self._geny_course_cache: OrderedDict[str, dict[str, Any]] = OrderedDict()
+        self._geny_directory_cache: OrderedDict[str, str] = OrderedDict()
         self._request_lock = asyncio.Lock()
         self._last_request_at = 0.0
         self._letrot_blocked_reason: str | None = None
+
+    @staticmethod
+    def _cache_get(cache: OrderedDict, key: Any) -> Any | None:
+        value = cache.get(key)
+        if value is not None:
+            cache.move_to_end(key)
+        return value
+
+    @staticmethod
+    def _cache_put(cache: OrderedDict, key: Any, value: Any, limit: int) -> None:
+        cache[key] = value
+        cache.move_to_end(key)
+        while len(cache) > limit:
+            cache.popitem(last=False)
 
     @staticmethod
     def _is_trot(discipline: str | None) -> bool:
@@ -892,10 +917,12 @@ class OfficialHistoryClient:
             else f"{self.geny_base_url}/cheval"
         )
         try:
-            directory_html = self._geny_directory_cache.get(directory_key)
+            directory_html = self._cache_get(self._geny_directory_cache, directory_key)
             if directory_html is None:
                 directory_html = await self._get_html(directory_url)
-                self._geny_directory_cache[directory_key] = directory_html
+                self._cache_put(
+                    self._geny_directory_cache, directory_key, directory_html, self.directory_cache_size
+                )
             profile_path = GenyHistoryParser.find_profile_path(directory_html, horse_name)
             if profile_path:
                 resolved = urljoin(f"{self.geny_base_url}/", profile_path)
@@ -986,8 +1013,9 @@ class OfficialHistoryClient:
         key = str(course_id).strip()
         if not key.isdigit():
             raise ProviderError(f"Identifiant de course Geny invalide: {course_id}")
-        if key in self._geny_course_cache:
-            return self._geny_course_cache[key]
+        cached = self._cache_get(self._geny_course_cache, key)
+        if cached is not None:
+            return cached
         if not self.enabled or not self.geny_enabled:
             return {
                 "data": {"course_id": key, "participants": []},
@@ -1005,7 +1033,7 @@ class OfficialHistoryClient:
                 "api_url": api_url,
             },
         }
-        self._geny_course_cache[key] = payload
+        self._cache_put(self._geny_course_cache, key, payload, self.course_cache_size)
         return payload
 
     async def get_history(
@@ -1022,8 +1050,9 @@ class OfficialHistoryClient:
             source,
             f"{race_date.isoformat() if race_date else ''}:{horse_id or ''}:{_normalized_name(horse_name)}",
         )
-        if cache_key in self._cache:
-            return self._cache[cache_key]
+        cached = self._cache_get(self._cache, cache_key)
+        if cached is not None:
+            return cached
         attempted: list[dict[str, Any]] = []
         official_rows: list[dict[str, Any]] = []
         if self._is_trot(discipline):
@@ -1076,5 +1105,5 @@ class OfficialHistoryClient:
                     "message": "Aucun historique certain n'a été trouvé; HippoEdge n'attache jamais une fiche ambiguë.",
                 },
             }
-        self._cache[cache_key] = payload
+        self._cache_put(self._cache, cache_key, payload, self.history_cache_size)
         return payload

@@ -350,3 +350,44 @@ def test_firewall_removes_provider_opinion_and_probable_odds_aliases():
         "rpr": 98,
     })
     assert clean == {"date": "2026-09-02"}
+
+
+def test_provider_caches_are_bounded_without_truncating_returned_history():
+    class BoundedClient(OfficialHistoryClient):
+        def __init__(self):
+            super().__init__(
+                request_interval_seconds=0,
+                history_cache_size=2,
+                course_cache_size=2,
+                directory_cache_size=1,
+            )
+            self.course_calls = 0
+
+        async def _get_geny(self, horse_id, horse_name, race_date=None):
+            return {
+                "data": {"historique": [{
+                    "date": "2026-01-01",
+                    "hippodrome": "Test",
+                    "distance": 2000,
+                    "position": 1,
+                    "source": "Geny carrière complète",
+                }]},
+                "meta": {"source": "Geny carrière complète", "status": "ok", "rows": 1},
+            }
+
+        async def _get_json(self, url, params=None):
+            self.course_calls += 1
+            return GENY_API_PARTICIPANTS
+
+    client = BoundedClient()
+    for horse in ("ALPHA", "BETA", "GAMMA"):
+        payload = asyncio.run(client.get_history(horse, "Plat"))
+        assert len(payload["data"]["historique"]) == 1
+    assert len(client._cache) == 2
+    assert not any("ALPHA" in key[1] for key in client._cache)
+
+    for course_id in ("101", "102", "103"):
+        asyncio.run(client.get_course_participants(course_id))
+    assert len(client._geny_course_cache) == 2
+    assert "101" not in client._geny_course_cache
+    assert client.course_calls == 3
