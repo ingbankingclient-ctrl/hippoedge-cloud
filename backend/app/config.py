@@ -9,6 +9,11 @@ class Settings(BaseSettings):
     app_name: str = "HippoEdge"
     environment: str = "development"
     database_url: str = "sqlite:///./hippoedge.db"
+    # Keep the SQLAlchemy client pool well below Supabase session-pooler limits.
+    # Render briefly overlaps old/new instances during deploys, so a small pool
+    # prevents startup failures while preserving normal API/background work.
+    database_pool_size: int = 1
+    database_max_overflow: int = 0
     provider: str = "demo"  # demo | pmu | turfbzh
     pmu_base_url: str = "https://online.turfinfo.api.pmu.fr/rest/client/1"
     letrot_base_url: str = "https://www.letrot.com"
@@ -35,7 +40,7 @@ class Settings(BaseSettings):
     timezone: str = "Europe/Paris"
     refresh_seconds: int = 900
     auto_lock_minutes_before: int = 2
-    methodology_version: str = "2026.09.04-v6.9.2-speed"
+    methodology_version: str = "2026.09.04-v6.9.4-rolling-startup"
     cors_origins: str = "*"
 
     model_config = SettingsConfigDict(

@@ -741,6 +741,20 @@ async def maintenance_loop(
                 if upcoming:
                     until_lock = (min(upcoming) - now).total_seconds() - settings.auto_lock_minutes_before * 60
                     next_wake = min(next_wake, max(1.0, until_lock))
+            except asyncio.CancelledError:
+                raise
+            except Exception as e:
+                # A rolling Render deploy can briefly start the new instance
+                # while the old Supabase session-pool connections are still
+                # alive. Do not kill the maintenance task: release any pooled
+                # state and retry shortly after the old instance is retired.
+                try:
+                    db.rollback()
+                except Exception:
+                    pass
+                print("maintenance cycle warning", e)
+                engine.dispose()
+                next_wake = min(next_wake, 10.0)
             finally:
                 db.close()
         # Detailed histories are fetched separately so the programme and
@@ -755,7 +769,19 @@ async def maintenance_loop(
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    Base.metadata.create_all(engine)
+    # Never make a rolling Render deploy depend on an immediately available
+    # Supabase session-pool slot. The previous instance can temporarily own
+    # every slot until Render marks this one healthy and retires it. SQLite
+    # still creates its local schema synchronously; PostgreSQL schema creation
+    # is best-effort because the production tables already exist.
+    if settings.database_url.startswith("sqlite"):
+        Base.metadata.create_all(engine)
+    else:
+        try:
+            Base.metadata.create_all(engine)
+        except Exception as exc:
+            print("startup database warning", exc)
+            engine.dispose()
     stop=asyncio.Event(); write_lock=asyncio.Lock(); history_tasks: dict[date, asyncio.Task] = {}
     task=asyncio.create_task(maintenance_loop(stop,write_lock,history_tasks))
     app.state.stop=stop; app.state.task=task; app.state.db_write_lock=write_lock; app.state.history_tasks=history_tasks
@@ -767,6 +793,9 @@ async def lifespan(app: FastAPI):
         history_task.cancel()
     if history_tasks:
         await asyncio.gather(*history_tasks.values(), return_exceptions=True)
+    # Release pooled PostgreSQL connections promptly when Render retires an
+    # old instance during a rolling deploy.
+    engine.dispose()
 
 
 app=FastAPI(title=settings.app_name,version="1.0.0",lifespan=lifespan)

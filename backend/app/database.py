@@ -19,12 +19,27 @@ elif database_url.startswith("postgresql://"):
 
 is_sqlite = database_url.startswith("sqlite")
 connect_args = {"check_same_thread": False, "timeout": 30} if is_sqlite else {}
-engine = create_engine(
-    database_url,
-    connect_args=connect_args,
-    future=True,
-    pool_pre_ping=not is_sqlite,
-)
+engine_kwargs = {
+    "connect_args": connect_args,
+    "future": True,
+    "pool_pre_ping": not is_sqlite,
+}
+if not is_sqlite:
+    # Supabase's session pooler on the current plan exposes a small client
+    # ceiling. SQLAlchemy's default QueuePool can reach 5 + 10 overflow
+    # connections *per Render instance*. During a rolling deploy the old and
+    # new instances overlap, which can exhaust that ceiling before startup.
+    # HippoEdge serialises database writes and does not need a large DB pool,
+    # so keep it deliberately small. This limits connections, not data depth.
+    engine_kwargs.update(
+        pool_size=max(1, int(settings.database_pool_size)),
+        max_overflow=max(0, int(settings.database_max_overflow)),
+        pool_timeout=5,
+        pool_recycle=120,
+        pool_use_lifo=True,
+    )
+
+engine = create_engine(database_url, **engine_kwargs)
 
 
 if is_sqlite:
