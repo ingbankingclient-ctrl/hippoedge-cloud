@@ -2,17 +2,18 @@
 
 HippoEdge est un produit complet **mobile + API** conçu pour analyser automatiquement les réunions/courses PMU du jour et du lendemain en appliquant une méthode indépendante des cotes, favoris et pronostics externes.
 
-La version **v6.9.2 — Carrières complètes et recroisement accéléré** lit tout le tableau de carrière public que la source publie pour chaque cheval Geny identifié avec certitude, sans plafond local de 500 lignes, puis rouvre chaque ancienne course par son identifiant exact pour récupérer tous les partants et résultats. Les téléchargements sont dédupliqués, limités en débit, enregistrés course par course et repris automatiquement après une interruption de l’hébergeur. Une musique comme `1a2a3a` n'est jamais assimilée à trois courses détaillées et aucun choix public n’est produit lorsque les preuves minimales manquent.
+La version **v6.9.6 — Analyse complète à la demande, course par course** lit tout le tableau de carrière public que la source publie pour chaque cheval Geny identifié avec certitude, sans plafond local de 500 lignes, puis rouvre chaque ancienne course par son identifiant exact pour récupérer tous les partants et résultats. Les téléchargements sont dédupliqués, limités en débit, enregistrés course par course et repris automatiquement après une interruption de l’hébergeur. Une musique comme `1a2a3a` n'est jamais assimilée à trois courses détaillées et aucun choix public n’est produit lorsque les preuves minimales manquent.
 
 ## Ce qui est déjà livré
 
 - Application mobile iPhone/Android via **Expo / React Native**.
 - API **FastAPI**.
 - Base SQLAlchemy : SQLite par défaut, PostgreSQL possible via `DATABASE_URL`.
-- Import automatique **jour J + J+1**.
+- Import léger automatique **jour J + J+1** (programme, partants, résultats).
+- Les carrières complètes, anciennes courses recroisées et scores lourds ne sont calculés qu'à la demande : clic sur une course ou lancement explicite de la page Sélections.
 - Accueil « Sélections du jour », menu mobile Réunion → Course et écran dédié aux arrivées provisoires/officielles.
 - Programme → réunions → courses → partants → historique chevaux.
-- Analyse automatique de chaque course.
+- Analyse complète d’une course uniquement lorsqu’elle est ouverte ; les faits déjà récupérés restent en base et sont réutilisés aux ouvertures suivantes.
 - Un paragraphe en français courant pour chaque cheval : contexte, performances vérifiées, forces, limites et conclusion. Les champs techniques sont traduits ou masqués pour un lecteur non spécialiste.
 - Un badge de fiabilité distingue une base exploitable, une lecture partielle, un historique en cours et un dossier non classé. Les scores neutres d’attente ne sont pas présentés comme des choix.
 - Cinq lectures par cheval :
@@ -42,7 +43,7 @@ La version **v6.9.2 — Carrières complètes et recroisement accéléré** lit 
   - robustesse au scénario et volatilité traitées séparément.
 - Snapshot pré-course **verrouillable** et verrouillage automatique avant le départ.
 - Résultats post-course + statistiques sans réécriture rétroactive.
-- Import rapide du programme et des résultats ; carrière complète puis anciennes courses détaillées récupérées en arrière-plan, avec sauvegarde cheval par cheval et course par course.
+- Import rapide du programme et des résultats ; aucun recroisement lourd de toute la journée ne tourne en arrière-plan. Une course ouverte charge seulement ses propres chevaux et son propre réseau historique. La page Sélections traite les courses une par une uniquement après action explicite.
 - Tests automatiques du scoring et du pare-feu anti-pronostics.
 
 ## Pare-feu d’indépendance
@@ -120,7 +121,7 @@ Copiez `.env.example` en `.env` puis :
 HIPPOEDGE_PROVIDER=pmu
 ```
 
-Redémarrez l’API. Le scheduler importe d’abord rapidement aujourd’hui et demain avec les partants et les arrivées, puis récupère les carrières complètes et recroise chaque ancienne course en arrière-plan. Le compteur de l’application indique la progression réelle. Les analyses sont recalculées dès qu’une preuve objective arrive et les snapshots sont verrouillés juste avant le départ.
+Redémarrez l’API. Le scheduler maintient uniquement le programme, les partants et les arrivées de J/J+1. Quand l’utilisateur ouvre une course, HippoEdge charge alors les carrières complètes de ses seuls partants, recroise leurs anciennes courses et calcule la méthode complète. Les faits récupérés sont persistés et réutilisés. Les anciennes courses exactes disposent aussi d’un cache PostgreSQL global par identifiant de course : une course déjà téléchargée pour un cheval ou une page est réutilisée pour les autres, y compris après redémarrage. La page Sélections ne lance aucun calcul lourd automatiquement : un bouton explicite traite les courses de la journée une par une. Quitter la page annule le traitement actif.
 
 ## Endpoints principaux
 
@@ -128,9 +129,11 @@ Redémarrez l’API. Le scheduler importe d’abord rapidement aujourd’hui et 
 - `POST /api/refresh?day=2026-09-01`
 - `GET /api/program/2026-09-01`
 - `GET /api/tomorrow`
-- `GET /api/day/{date}/selections`
+- `GET /api/day/{date}/selections` (lecture des sélections déjà calculées)
+- `POST /api/day/{date}/analyze-selections` (calcul explicite de la journée, course par course)
 - `GET /api/day/{date}/history-status`
-- `GET /api/races/{race_id}/analysis`
+- `POST /api/races/{race_id}/analyze` (analyse complète à la demande)
+- `GET /api/races/{race_id}/analysis` (compatibilité ; applique aussi le mode à la demande)
 - `POST /api/races/{race_id}/lock`
 - `GET /api/stats`
 
@@ -176,3 +179,8 @@ Le recroisement exact des anciennes courses reste complet mais n'est plus strict
 ## Limite honnête
 
 Le code est fonctionnel de bout en bout. « Complet » signifie toutes les courses présentes dans le tableau public de la fiche exactement identifiée ; aucune source gratuite ne garantit à elle seule tous les chevaux ayant couru partout dans le monde. Une fiche absente ou une ancienne course sans participants reste donc explicitement incomplète. La version web installable évite les frais Apple et fonctionne sans Expo Go une fois mise en ligne. Une publication native dans l’App Store nécessiterait en revanche les certificats et le compte développeur du propriétaire de l’application.
+
+
+### Mode v6.9.6 — à la demande
+
+HippoEdge ne tente plus de recroiser les milliers de lignes historiques de toute la journée au chargement. Le programme reste léger. Un clic sur une course prépare uniquement les chevaux de cette course, conserve les faits en base, recroise leur réseau A→B→C→D puis calcule les scores. Quitter l’écran annule les requêtes encore actives. La page Sélections fonctionne de la même manière, mais uniquement après le bouton « Lancer les sélections du jour » et en traitant les courses séquentiellement afin de protéger la RAM et le pool PostgreSQL.
