@@ -142,3 +142,12 @@ Geny est utilisé comme complément factuel en lecture seule. L’identifiant nu
 Le parseur Geny conserve uniquement des faits : identité, date, hippodrome/pays, nom et identifiant de course, discipline, distance, terrain/surface, catégorie, allocation, rang/incident, chrono, poids, valeur handicap, corde/départ, équipement, jockey/driver, entraîneur, propriétaire et participants. Il ignore explicitement `cote`, `cotePmu`, `coteGeny`, rapports, Quinté, `pronostic`, favoris et `noteFinDeCourse`. Le pare-feu commun supprime une seconde fois toutes les familles de marché, d’avis et de sélection avant stockage.
 
 Pour l’étranger, la priorité reste la source hippique officielle du pays lorsqu’elle offre un accès public, automatisable et autorisé. Exemples de contrôle : Equibase pour le galop américain, HKJC pour Hong Kong, USTA Pathway pour le trot américain, Svensk Travsport pour le trot suédois et Standardbred Canada pour le trot canadien. Une source avec CAPTCHA, connexion, paiement ou restriction de réutilisation n’est pas aspirée silencieusement. Si aucune donnée certaine n’est disponible, l’historique reste incomplet, la volatilité augmente et le paragraphe du cheval le signale explicitement.
+
+
+## v6.9.7 — mode de calcul préchargé
+
+Le moment du calcul change, pas la méthode. HippoEdge prépare J0/J+1 en arrière-plan, conserve les faits déjà vérifiés et ne recalcule une course que lorsqu’une donnée factuelle utile a changé ou qu’une nouvelle version méthodologique l’exige. Les cinq notes principales, le réseau d’adversaires séparé et les chaînes A→B→C→D restent inchangés.
+
+Une journée n’est déclarée `ready` que lorsque les profils ne sont plus en état `pending/loading`, que les anciennes courses identifiées ne sont plus en attente de recroisement et que chaque course chargée possède un snapshot de la version méthodologique courante. Les débutants peuvent être « vérifiés » sans historique : ils restent visibles mais non transformés en choix s’ils n’atteignent pas les seuils de preuve.
+
+Le volet « Engagements futurs » est informatif et indépendant des classements. Un cheval retrouvé dans un programme ultérieur est signalé avec son prochain engagement connu, mais cette information ne modifie aucune note principale sans preuve factuelle supplémentaire sur un objectif d’entourage.

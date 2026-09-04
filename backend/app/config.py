@@ -36,6 +36,7 @@ class Settings(BaseSettings):
     history_course_fetch_concurrency: int = 8
     # Horse-profile requests for one clicked race may overlap, while request starts remain throttled.
     history_profile_fetch_concurrency: int = 4
+    history_profile_batch_size: int = 16
     # Failed historical-race lookups are retried on later maintenance passes instead of being abandoned forever.
     history_course_retry_cooldown_seconds: int = 900
     selection_min_history_rows: int = 3
@@ -44,8 +45,15 @@ class Settings(BaseSettings):
     turfbzh_base_url: str = "https://www.turf.bzh/api/v1"
     timezone: str = "Europe/Paris"
     refresh_seconds: int = 900
+    # Background preparation: programme/results are checked every refresh cycle,
+    # while full horse profiles are refreshed less aggressively to stay current
+    # without re-downloading every career continuously.
+    preload_enabled: bool = True
+    preload_refresh_seconds: int = 900
+    history_profile_refresh_seconds: int = 1800
+    future_engagement_days: int = 30
     auto_lock_minutes_before: int = 2
-    methodology_version: str = "2026.09.04-v6.9.6-on-demand"
+    methodology_version: str = "2026.09.04-v6.9.7-preloaded-live"
     cors_origins: str = "*"
 
     model_config = SettingsConfigDict(

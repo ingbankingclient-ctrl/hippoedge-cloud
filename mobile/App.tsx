@@ -285,6 +285,7 @@ export default function App() {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
   const [stats, setStats] = useState<any>(null);
+  const [dashboard, setDashboard] = useState<any>(null);
   const [url, setUrl] = useState('');
   const [health, setHealth] = useState<any>(null);
   const [dayOffset, setDayOffset] = useState<0 | 1>(0);
@@ -302,12 +303,36 @@ export default function App() {
     };
   }, []);
 
+  useEffect(() => {
+    const timer = setInterval(async () => {
+      const day = localISO(dayOffset);
+      try {
+        const dash = await Api.dashboard(day);
+        setDashboard(dash);
+        if (dash?.ready) {
+          const picks = await Api.selections(day).catch(() => null);
+          if (picks) setSelections(picks);
+        }
+      } catch {
+        // Keep the last known UI state; the normal refresh/error path remains explicit.
+      }
+    }, 30000);
+    return () => clearInterval(timer);
+  }, [dayOffset]);
+
   async function loadProgram(offset: 0 | 1 = dayOffset) {
     setLoading(true);
     setError('');
+    const day = localISO(offset);
     try {
-      const program = await Api.program(localISO(offset));
+      const [program, dash, picks] = await Promise.all([
+        Api.program(day),
+        Api.dashboard(day).catch(() => null),
+        Api.selections(day).catch(() => null),
+      ]);
       setMeetings(normalizeMeetings(program));
+      setDashboard(dash);
+      setSelections(picks);
     } catch (e: any) {
       setMeetings([]);
       setError(`Programme : ${e?.message || String(e)}`);
@@ -328,13 +353,19 @@ export default function App() {
   async function refresh() {
     selectionAbortRef.current?.abort();
     selectionAbortRef.current = null;
-    setSelections(null);
     setLoading(true);
     setError('');
+    const day = localISO(dayOffset);
     try {
-      await Api.refresh(localISO(dayOffset));
-      const program = await Api.program(localISO(dayOffset));
+      await Api.refresh(day);
+      const [program, dash, picks] = await Promise.all([
+        Api.program(day),
+        Api.dashboard(day).catch(() => null),
+        Api.selections(day).catch(() => null),
+      ]);
       setMeetings(normalizeMeetings(program));
+      setDashboard(dash);
+      setSelections(picks);
     } catch (e: any) {
       setError(`Actualisation : ${e?.message || String(e)}`);
     } finally {
@@ -344,58 +375,49 @@ export default function App() {
 
   async function openRace(race: Race) {
     raceAbortRef.current?.abort();
-    const controller = new AbortController();
-    raceAbortRef.current = controller;
+    raceAbortRef.current = null;
     setSelected(race);
     setAnalysis(null);
     setLoading(true);
     setError('');
     try {
-      const loaded = await Api.analyzeRace(race.id, controller.signal);
-      if (controller.signal.aborted) return;
+      // Read the already-prepared snapshot only. Heavy data collection and
+      // scoring are handled continuously by the backend preload worker.
+      const loaded = await Api.analysis(race.id);
       setAnalysis(loaded);
       if (loaded.result && !race.result) {
         setSelected({...race, result: loaded.result});
       }
     } catch (e: any) {
-      if (controller.signal.aborted || e?.name === 'AbortError') return;
       setError(e?.message || String(e));
     } finally {
-      if (raceAbortRef.current === controller) raceAbortRef.current = null;
-      if (!controller.signal.aborted) setLoading(false);
+      setLoading(false);
     }
   }
 
   async function runSelections() {
     selectionAbortRef.current?.abort();
-    const controller = new AbortController();
-    selectionAbortRef.current = controller;
-    setSelections(null);
+    selectionAbortRef.current = null;
     setSelectionRunning(true);
     setLoading(true);
     setError('');
+    const day = localISO(dayOffset);
     try {
-      await Api.refresh(localISO(dayOffset));
-      const picks = await Api.analyzeSelections(localISO(dayOffset), controller.signal);
-      if (!controller.signal.aborted) setSelections(picks);
+      const [picks, dash] = await Promise.all([
+        Api.selections(day),
+        Api.dashboard(day).catch(() => null),
+      ]);
+      setSelections(picks);
+      setDashboard(dash);
     } catch (e: any) {
-      if (controller.signal.aborted || e?.name === 'AbortError') return;
       setError(e?.message || String(e));
     } finally {
-      if (selectionAbortRef.current === controller) selectionAbortRef.current = null;
       setSelectionRunning(false);
-      if (!controller.signal.aborted) setLoading(false);
+      setLoading(false);
     }
   }
 
   function switchTab(next: Tab) {
-    if (tab === 'selections' && next !== 'selections') {
-      selectionAbortRef.current?.abort();
-      selectionAbortRef.current = null;
-      setSelections(null);
-      setSelectionRunning(false);
-      setLoading(false);
-    }
     setError('');
     setTab(next);
   }
@@ -417,7 +439,12 @@ export default function App() {
   async function loadStats() {
     switchTab('stats');
     try {
-      setStats(await Api.stats());
+      const [performanceStats, dash] = await Promise.all([
+        Api.stats(),
+        Api.dashboard(localISO(dayOffset)),
+      ]);
+      setStats(performanceStats);
+      setDashboard(dash);
     } catch (e: any) {
       setError(e.message);
     }
@@ -478,6 +505,7 @@ export default function App() {
           <SelectionsScreen
             dayOffset={dayOffset}
             selections={selections}
+            dashboard={dashboard}
             loading={selectionRunning}
             error={error}
             onDay={chooseDay}
@@ -489,6 +517,7 @@ export default function App() {
             dayOffset={dayOffset}
             meetings={meetings}
             selections={selections}
+            dashboard={dashboard}
             loading={loading}
             error={error}
             onDay={chooseDay}
@@ -507,7 +536,7 @@ export default function App() {
             onRace={openRace}
           />
         )}
-        {tab === 'stats' && <Stats stats={stats} error={error} />}
+        {tab === 'stats' && <Stats stats={stats} dashboard={dashboard} error={error} />}
         {tab === 'settings' && (
           <Settings
             url={url}
@@ -533,6 +562,7 @@ export default function App() {
 function SelectionsScreen({
   dayOffset,
   selections,
+  dashboard,
   loading,
   error,
   onDay,
@@ -540,12 +570,13 @@ function SelectionsScreen({
 }: {
   dayOffset: 0 | 1;
   selections: any;
+  dashboard: any;
   loading: boolean;
   error: string;
   onDay: (offset: 0 | 1) => void;
   onRun: () => void;
 }) {
-  const dayReady = !!selections?.day && (
+  const dayReady = !!dashboard?.ready && !!selections?.day && (
     !!selections.day.ready ||
     ['horse', 'placed', 'outsider', 'tocard', 'heart'].some(kind => !!selections.day[kind])
   );
@@ -559,24 +590,24 @@ function SelectionsScreen({
         </Text>
         <Text style={s.selectionHeroDate}>{longDate(dayOffset)}</Text>
         <Text style={s.selectionHeroText}>
-          Le calcul complet ne démarre que lorsque tu le demandes. HippoEdge traite alors les courses une par une avec la méthode complète.
+          HippoEdge prépare automatiquement les carrières, le réseau A→B→C→D et les analyses avant ton arrivée. Cette page lit uniquement les sélections déjà calculées.
         </Text>
         <DaySwitcher dayOffset={dayOffset} onDay={onDay} />
         <GoldButton
-          label={dayReady ? 'Relancer les sélections du jour' : 'Lancer les sélections du jour'}
+          label={dayReady ? 'Actualiser les sélections' : 'Vérifier si la journée est prête'}
           icon="▶"
           onPress={onRun}
         />
       </View>
       {!!selections?.day?.data_quality && <DataQualityCard quality={selections.day.data_quality} />}
-      {loading && <Loading text="Analyse complète course par course…" />}
+      {loading && <Loading text="Lecture des sélections pré-calculées…" />}
       {!!error && <ErrorCard title="Analyse interrompue" text={error} />}
       {dayReady ? (
         <DayPicks picks={selections.day} />
       ) : (
         !loading && <EmptyState
-          title="Sélections non lancées"
-          text="Aucun calcul lourd ne tourne en arrière-plan. Appuie sur « Lancer les sélections du jour ». Si tu quittes cette page, le calcul est annulé et devra être relancé."
+          title="Préparation automatique en cours"
+          text="Le backend prépare les courses en arrière-plan. Dès qu’une analyse est prête, elle reste disponible instantanément sans recalcul au clic."
         />
       )}
       {!!selections?.meetings?.length && (
@@ -599,6 +630,7 @@ function Program({
   dayOffset,
   meetings,
   selections,
+  dashboard,
   loading,
   error,
   onDay,
@@ -608,6 +640,7 @@ function Program({
   dayOffset: 0 | 1;
   meetings: Meeting[];
   selections: any;
+  dashboard: any;
   loading: boolean;
   error: string;
   onDay: (offset: 0 | 1) => void;
@@ -655,6 +688,16 @@ function Program({
           <View style={s.tinyDot} />
           <Text style={s.heroStat}>{raceCount} courses</Text>
         </View>
+        {!!dashboard && (
+          <View style={[s.preloadBanner, dashboard.ready ? s.preloadReady : s.preloadUpdating]}>
+            <Text style={[s.preloadTitle, dashboard.ready ? {color: C.green} : {color: C.goldBright}]}>
+              {dashboard.ready ? '✓ JOURNÉE PRÊTE' : '… PRÉPARATION AUTOMATIQUE'}
+            </Text>
+            <Text style={s.preloadText}>
+              {dashboard.activity?.courses_analyzed || 0}/{dashboard.activity?.courses_total || 0} courses · {dashboard.activity?.horses_analyzed || 0}/{dashboard.activity?.horses_total || 0} chevaux analysés
+            </Text>
+          </View>
+        )}
       </View>
 
       {loading && <Loading text="HippoEdge analyse les données…" />}
@@ -708,7 +751,22 @@ function Program({
               </Pressable>
             ))}
           </ScrollView>
-          {!!activeRace && <CourseMenuCard race={activeRace} onOpen={() => onRace(activeRace)} />}
+          {!!activeRace && (
+            <CourseMenuCard
+              race={activeRace}
+              ready={!!dashboard?.ready}
+              onOpen={() => {
+                if (dashboard?.ready) {
+                  onRace(activeRace);
+                } else {
+                  Alert.alert(
+                    'Préparation automatique',
+                    'HippoEdge termine les profils, les anciennes courses et le réseau historique. L’analyse sera accessible dès que la journée sera prête.',
+                  );
+                }
+              }}
+            />
+          )}
         </View>
       )}
       {!loading && !safeMeetings.length && <EmptyState title="Programme indisponible" text="Aucune réunion chargée pour cette date." />}
@@ -793,7 +851,7 @@ function SelectionMeetingCard({meeting}: {meeting: any}) {
   );
 }
 
-function CourseMenuCard({race, onOpen}: {race: Race; onOpen: () => void}) {
+function CourseMenuCard({race, ready, onOpen}: {race: Race; ready: boolean; onOpen: () => void}) {
   return (
     <View style={s.courseCard}>
       <View style={s.courseCardTop}>
@@ -812,7 +870,7 @@ function CourseMenuCard({race, onOpen}: {race: Race; onOpen: () => void}) {
         {!!race.purse_eur && <Chip text={`${Math.round(race.purse_eur).toLocaleString('fr-FR')} €`} />}
       </View>
       {!!race.result && <Arrival result={race.result} />}
-      <GoldButton label="Ouvrir l’analyse complète" icon="→" onPress={onOpen} />
+      <GoldButton label={ready ? "Ouvrir l’analyse instantanée" : "Préparation en cours…"} icon={ready ? "→" : "…"} onPress={onOpen} />
     </View>
   );
 }
@@ -934,50 +992,122 @@ function EmptyState({title, text}: {title: string; text: string}) {
   );
 }
 
-function Stats({stats, error}: {stats: any; error: string}) {
+function Stats({stats, dashboard, error}: {stats: any; dashboard: any; error: string}) {
+  const [windowDays, setWindowDays] = useState<3 | 7 | 14 | 30>(30);
+  const activity = dashboard?.activity || {};
+  const engagements = (dashboard?.engagements?.items || []).filter(
+    (item: any) => Number(item?.next?.days_after ?? 999) <= windowDays,
+  );
+
   return (
     <ScrollView showsVerticalScrollIndicator={false} contentContainerStyle={s.content}>
       <View style={s.pageIntro}>
-        <Eyebrow>TRANSPARENCE DU MODÈLE</Eyebrow>
-        <Text style={s.pageTitle}>Journal de performance</Text>
+        <Eyebrow>ACTIVITÉ HIPPOEDGE</Eyebrow>
+        <Text style={s.pageTitle}>Journal du jour</Text>
         <Text style={s.pageText}>
-          Seules les analyses figées avant le départ sont évaluées. Aucun résultat ne peut réécrire
-          le passé.
+          Les compteurs viennent de la base persistante. Un redémarrage Render ne remet pas les analyses ou les engagements connus à zéro.
         </Text>
       </View>
       {!!error && <Text style={s.error}>{error}</Text>}
+
+      {!!dashboard && (
+        <>
+          <View style={[s.preloadBanner, dashboard.ready ? s.preloadReady : s.preloadUpdating]}>
+            <Text style={[s.preloadTitle, dashboard.ready ? {color: C.green} : {color: C.goldBright}]}>
+              {dashboard.ready ? '✓ JOURNÉE PRÊTE' : '… MISE À JOUR EN COURS'}
+            </Text>
+            <Text style={s.preloadText}>
+              {activity.courses_analyzed || 0}/{activity.courses_total || 0} courses prêtes · {activity.horses_analyzed || 0}/{activity.horses_total || 0} chevaux analysés
+            </Text>
+          </View>
+
+          <Section
+            eyebrow="ACTIVITÉ DU JOUR"
+            title="Ce qu’HippoEdge a réellement traité"
+            text="Chevaux et courses uniques de la journée, plus l’avancement du réseau historique."
+          />
+          <View style={s.statsGrid}>
+            <Stat label="Courses analysées" value={`${activity.courses_analyzed || 0}/${activity.courses_total || 0}`} featured />
+            <Stat label="Chevaux analysés" value={`${activity.horses_analyzed || 0}/${activity.horses_total || 0}`} />
+            <Stat label="Courses en mise à jour" value={activity.courses_updating || 0} />
+            <Stat label="Réseau historique recroisé" value={`${activity.historical_rows_linked || 0}/${activity.historical_rows_total || 0}`} />
+            <Stat label="Profils vérifiés" value={`${activity.profiles_checked || 0}/${activity.profiles_total || 0}`} />
+            <Stat label="Anciennes courses en cache global" value={activity.cached_historical_races_global || 0} />
+          </View>
+
+          <Section
+            eyebrow="ENGAGEMENTS FUTURS"
+            title="Chevaux du jour déjà revus au programme"
+            text={`${dashboard.engagements?.count || 0} cheval${Number(dashboard.engagements?.count || 0) > 1 ? 'aux' : ''} du jour possède${Number(dashboard.engagements?.count || 0) > 1 ? 'nt' : ''} déjà un engagement futur connu${dashboard.engagements?.programs_known_through ? ` · programmes chargés jusqu’au ${dashboard.engagements.programs_known_through}` : ''}.`}
+          />
+          <View style={s.filterRow}>
+            {[3, 7, 14, 30].map(days => (
+              <Pressable
+                key={days}
+                style={[s.filterChip, windowDays === days && s.filterChipActive]}
+                onPress={() => setWindowDays(days as 3 | 7 | 14 | 30)}>
+                <Text style={[s.filterChipText, windowDays === days && s.filterChipTextActive]}>≤ {days} j</Text>
+              </Pressable>
+            ))}
+          </View>
+
+          {!engagements.length && (
+            <EmptyState
+              title="Aucun engagement futur connu"
+              text={`Aucun cheval du jour n’est actuellement retrouvé dans un programme futur à ≤ ${windowDays} jours.`}
+            />
+          )}
+          {engagements.map((item: any, index: number) => (
+            <View key={`${item.horse_external_id || item.horse_name}-${item.today?.race_id}-${index}`} style={s.engagementCard}>
+              <View style={s.engagementHead}>
+                <View style={{flex: 1}}>
+                  <Text style={s.engagementHorse}>{item.horse_name}</Text>
+                  <Text style={s.engagementToday}>
+                    Aujourd’hui · {item.today?.meeting_code} {item.today?.race_code} · {item.today?.track}
+                  </Text>
+                </View>
+                <View style={s.delayBadge}><Text style={s.delayText}>J+{item.next?.days_after || 0}</Text></View>
+              </View>
+              <View style={s.engagementArrowRow}>
+                <Text style={s.engagementArrow}>↓</Text>
+                <View style={{flex: 1}}>
+                  <Text style={s.engagementNext}>
+                    {item.next?.date} · {item.next?.meeting_code} {item.next?.race_code} · {item.next?.track}
+                  </Text>
+                  <Text style={s.engagementMeta}>
+                    {plainLabel(item.next?.discipline)}{item.next?.distance_m ? ` · ${item.next.distance_m} m` : ''} · {item.next?.status === 'non_partant' ? 'non-partant' : 'au programme'}
+                  </Text>
+                </View>
+              </View>
+              {Number(item.known_future_count || 0) > 1 && (
+                <Text style={s.engagementMore}>+ {Number(item.known_future_count) - 1} autre(s) engagement(s) connu(s)</Text>
+              )}
+            </View>
+          ))}
+        </>
+      )}
+
+      <Section eyebrow="PERFORMANCE DU MODÈLE" title="Bilan des snapshots verrouillés" />
       {!!stats && (
         <View style={s.statsGrid}>
           <Stat label="Courses évaluées" value={stats.races_evaluees} featured />
-          <Stat
-            label="Choix gagnant"
-            value={stats.choix_gagnant_pct != null ? `${stats.choix_gagnant_pct}%` : '—'}
-          />
-          <Stat
-            label="Choix placé Top 3"
-            value={stats.choix_place_top3_pct != null ? `${stats.choix_place_top3_pct}%` : '—'}
-          />
-          <Stat
-            label="Gagnant dans Top 3"
-            value={
-              stats.gagnant_dans_top3_performance_pct != null
-                ? `${stats.gagnant_dans_top3_performance_pct}%`
-                : '—'
-            }
-          />
+          <Stat label="Choix gagnant" value={stats.choix_gagnant_pct != null ? `${stats.choix_gagnant_pct}%` : '—'} />
+          <Stat label="Choix placé Top 3" value={stats.choix_place_top3_pct != null ? `${stats.choix_place_top3_pct}%` : '—'} />
+          <Stat label="Gagnant dans Top 3" value={stats.gagnant_dans_top3_performance_pct != null ? `${stats.gagnant_dans_top3_performance_pct}%` : '—'} />
         </View>
       )}
+
       <View style={s.infoCard}>
         <Eyebrow>PROTOCOLE</Eyebrow>
         <Text style={s.infoTitle}>Mesurer sans réécrire</Text>
         <Text style={s.body}>
-          Chaque snapshot conserve les scores tels qu’ils existaient avant le départ. Les résultats
-          servent ensuite uniquement à mesurer la précision réelle de la méthode.
+          Chaque snapshot conserve les scores tels qu’ils existaient avant le départ. Les résultats servent ensuite uniquement à mesurer la précision réelle de la méthode.
         </Text>
       </View>
     </ScrollView>
   );
 }
+
 
 function Settings({
   url,
@@ -2023,4 +2153,25 @@ const s = StyleSheet.create({
   raceResultHead: {flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', gap: 10},
   raceResultTitle: {color: C.ivory, fontSize: 17, fontWeight: '900', marginTop: 4},
   raceResultNotice: {color: C.mutedDark, fontSize: 9.5, lineHeight: 15, marginTop: 10},
+  preloadBanner: {marginTop: 13, borderRadius: 15, borderWidth: 1, paddingHorizontal: 13, paddingVertical: 11, gap: 4},
+  preloadReady: {backgroundColor: '#0E1A15', borderColor: '#2D4D3E'},
+  preloadUpdating: {backgroundColor: '#1D190F', borderColor: '#584A2A'},
+  preloadTitle: {fontSize: 9, fontWeight: '900', letterSpacing: 1.1},
+  preloadText: {color: C.muted, fontSize: 10.5, lineHeight: 15},
+  filterRow: {flexDirection: 'row', flexWrap: 'wrap', gap: 8},
+  filterChip: {borderRadius: 99, borderWidth: 1, borderColor: C.line, backgroundColor: '#0A0D12', paddingHorizontal: 12, paddingVertical: 8},
+  filterChipActive: {backgroundColor: '#1D190F', borderColor: C.goldDeep},
+  filterChipText: {color: C.muted, fontSize: 10, fontWeight: '800'},
+  filterChipTextActive: {color: C.goldBright},
+  engagementCard: {backgroundColor: C.card, borderRadius: 18, borderWidth: 1, borderColor: C.lineSoft, padding: 14, gap: 10},
+  engagementHead: {flexDirection: 'row', alignItems: 'center', gap: 10},
+  engagementHorse: {color: C.ivory, fontSize: 14, fontWeight: '900'},
+  engagementToday: {color: C.mutedDark, fontSize: 9.5, marginTop: 3},
+  delayBadge: {minWidth: 42, height: 32, borderRadius: 12, backgroundColor: '#1B170E', borderWidth: 1, borderColor: '#574827', alignItems: 'center', justifyContent: 'center'},
+  delayText: {color: C.goldBright, fontSize: 10, fontWeight: '900'},
+  engagementArrowRow: {flexDirection: 'row', gap: 10, alignItems: 'flex-start'},
+  engagementArrow: {color: C.gold, fontSize: 18, lineHeight: 20},
+  engagementNext: {color: C.text, fontSize: 11.5, fontWeight: '800', lineHeight: 16},
+  engagementMeta: {color: C.muted, fontSize: 10, lineHeight: 15, marginTop: 3},
+  engagementMore: {color: C.goldDeep, fontSize: 9.5, fontWeight: '800'},
 });

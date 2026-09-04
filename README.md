@@ -2,7 +2,7 @@
 
 HippoEdge est un produit complet **mobile + API** conçu pour analyser automatiquement les réunions/courses PMU du jour et du lendemain en appliquant une méthode indépendante des cotes, favoris et pronostics externes.
 
-La version **v6.9.6 — Analyse complète à la demande, course par course** lit tout le tableau de carrière public que la source publie pour chaque cheval Geny identifié avec certitude, sans plafond local de 500 lignes, puis rouvre chaque ancienne course par son identifiant exact pour récupérer tous les partants et résultats. Les téléchargements sont dédupliqués, limités en débit, enregistrés course par course et repris automatiquement après une interruption de l’hébergeur. Une musique comme `1a2a3a` n'est jamais assimilée à trois courses détaillées et aucun choix public n’est produit lorsque les preuves minimales manquent.
+La version **v6.9.7 — Préchargement permanent + affichage instantané** prépare automatiquement J0 et J+1 en arrière-plan. Elle lit tout le tableau de carrière public que la source publie pour chaque cheval Geny identifié avec certitude, sans plafond local de 500 lignes, puis rouvre chaque ancienne course par son identifiant exact pour récupérer tous les partants et résultats. Les téléchargements sont dédupliqués, limités en débit, enregistrés course par course et repris automatiquement après une interruption de l’hébergeur. Une musique comme `1a2a3a` n'est jamais assimilée à trois courses détaillées et aucun choix public n’est produit lorsque les preuves minimales manquent.
 
 ## Ce qui est déjà livré
 
@@ -10,10 +10,10 @@ La version **v6.9.6 — Analyse complète à la demande, course par course** lit
 - API **FastAPI**.
 - Base SQLAlchemy : SQLite par défaut, PostgreSQL possible via `DATABASE_URL`.
 - Import léger automatique **jour J + J+1** (programme, partants, résultats).
-- Les carrières complètes, anciennes courses recroisées et scores lourds ne sont calculés qu'à la demande : clic sur une course ou lancement explicite de la page Sélections.
+- Les carrières complètes, anciennes courses recroisées et scores lourds sont préparés automatiquement en arrière-plan pour J0/J+1. Les pages Course et Sélections lisent ensuite des snapshots persistés au lieu de recalculer au clic.
 - Accueil « Sélections du jour », menu mobile Réunion → Course et écran dédié aux arrivées provisoires/officielles.
 - Programme → réunions → courses → partants → historique chevaux.
-- Analyse complète d’une course uniquement lorsqu’elle est ouverte ; les faits déjà récupérés restent en base et sont réutilisés aux ouvertures suivantes.
+- Préparation complète avant ouverture : une course devient accessible quand son snapshot courant est prêt ; les faits déjà récupérés restent en base et sont réutilisés aux cycles suivants.
 - Un paragraphe en français courant pour chaque cheval : contexte, performances vérifiées, forces, limites et conclusion. Les champs techniques sont traduits ou masqués pour un lecteur non spécialiste.
 - Un badge de fiabilité distingue une base exploitable, une lecture partielle, un historique en cours et un dossier non classé. Les scores neutres d’attente ne sont pas présentés comme des choix.
 - Cinq lectures par cheval :
@@ -43,7 +43,7 @@ La version **v6.9.6 — Analyse complète à la demande, course par course** lit
   - robustesse au scénario et volatilité traitées séparément.
 - Snapshot pré-course **verrouillable** et verrouillage automatique avant le départ.
 - Résultats post-course + statistiques sans réécriture rétroactive.
-- Import rapide du programme et des résultats ; aucun recroisement lourd de toute la journée ne tourne en arrière-plan. Une course ouverte charge seulement ses propres chevaux et son propre réseau historique. La page Sélections traite les courses une par une uniquement après action explicite.
+- Import permanent du programme et des résultats, préchargement séquentiel J0/J+1, rafraîchissement périodique des profils devenus anciens, cache persistant des anciennes courses et snapshots pré-calculés. Une course ouverte n’effectue plus de téléchargement lourd.
 - Tests automatiques du scoring et du pare-feu anti-pronostics.
 
 ## Pare-feu d’indépendance
@@ -121,7 +121,7 @@ Copiez `.env.example` en `.env` puis :
 HIPPOEDGE_PROVIDER=pmu
 ```
 
-Redémarrez l’API. Le scheduler maintient uniquement le programme, les partants et les arrivées de J/J+1. Quand l’utilisateur ouvre une course, HippoEdge charge alors les carrières complètes de ses seuls partants, recroise leurs anciennes courses et calcule la méthode complète. Les faits récupérés sont persistés et réutilisés. Les anciennes courses exactes disposent aussi d’un cache PostgreSQL global par identifiant de course : une course déjà téléchargée pour un cheval ou une page est réutilisée pour les autres, y compris après redémarrage. La page Sélections ne lance aucun calcul lourd automatiquement : un bouton explicite traite les courses de la journée une par une. Quitter la page annule le traitement actif.
+Redémarrez l’API. Le scheduler maintient le programme, les partants et les arrivées de J/J+1, puis un worker séparé prépare les carrières, le réseau historique et les snapshots avant l’ouverture de l’application. Quand l’utilisateur ouvre une course, HippoEdge charge alors les carrières complètes de ses seuls partants, recroise leurs anciennes courses et calcule la méthode complète. Les faits récupérés sont persistés et réutilisés. Les anciennes courses exactes disposent aussi d’un cache PostgreSQL global par identifiant de course : une course déjà téléchargée pour un cheval ou une page est réutilisée pour les autres, y compris après redémarrage. La page Sélections ne lance aucun calcul lourd automatiquement : un bouton explicite traite les courses de la journée une par une. Quitter la page annule le traitement actif.
 
 ## Endpoints principaux
 
@@ -184,3 +184,20 @@ Le code est fonctionnel de bout en bout. « Complet » signifie toutes les cours
 ### Mode v6.9.6 — à la demande
 
 HippoEdge ne tente plus de recroiser les milliers de lignes historiques de toute la journée au chargement. Le programme reste léger. Un clic sur une course prépare uniquement les chevaux de cette course, conserve les faits en base, recroise leur réseau A→B→C→D puis calcule les scores. Quitter l’écran annule les requêtes encore actives. La page Sélections fonctionne de la même manière, mais uniquement après le bouton « Lancer les sélections du jour » et en traitant les courses séquentiellement afin de protéger la RAM et le pool PostgreSQL.
+
+
+## Mode v6.9.7 — préchargement permanent et affichage instantané
+
+- J0 et J+1 sont préparés automatiquement par un worker séquentiel afin de ne pas doubler la pression sur la source ou sur PostgreSQL.
+- Les profils déjà contrôlés sont réutilisés ; ils sont re-vérifiés lorsqu’ils deviennent anciens selon `HIPPOEDGE_HISTORY_PROFILE_REFRESH_SECONDS`.
+- Les anciennes courses exactes restent dans `historical_race_cache` et ne sont pas re-téléchargées pour un autre cheval ou un autre jour.
+- Les snapshots de toutes les courses chargées sont calculés en arrière-plan avec la méthode complète. Le clic utilisateur sur une course lit le snapshot courant ; il ne lance plus le réseau historique.
+- Tant que la journée n’est pas `ready`, l’interface affiche « Préparation automatique » et n’ouvre pas les analyses partielles.
+- La page Sélections lit les snapshots déjà calculés et n’exécute plus un calcul lourd à la demande.
+- `/api/day/{day}/dashboard` expose les compteurs persistants de courses/chevaux analysés, l’avancement historique, le nombre de profils vérifiés, le cache global et les engagements futurs connus.
+- Le volet « Engagements futurs » compare les chevaux du jour aux programmes futurs déjà présents en base et affiche leur prochain engagement connu avec filtres J+3/J+7/J+14/J+30. Il ne transforme pas un engagement en intention d’entourage.
+- L’application interroge le dashboard toutes les 30 secondes afin de basculer automatiquement de « mise à jour » à « journée prête » sans recalcul au clic.
+
+Validation : **73 tests backend passent**. Syntaxe TypeScript de `App.tsx` et `src/api.ts` vérifiée.
+
+Méthodologie : `2026.09.04-v6.9.7-preloaded-live`.

@@ -6,7 +6,7 @@ from datetime import date, datetime, timedelta
 
 from fastapi import Depends, FastAPI, HTTPException, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.orm import Session, selectinload
 
 from .analysis_service import (
@@ -40,6 +40,24 @@ def _source_label(current: object, incoming: object) -> str | None:
             if label and label not in labels:
                 labels.append(label)
     return " + ".join(labels) or None
+
+
+def _parse_iso_datetime(value: object) -> datetime | None:
+    text = str(value or "").strip()
+    if not text:
+        return None
+    try:
+        return datetime.fromisoformat(text)
+    except ValueError:
+        return None
+
+
+def _history_profile_stale(raw: dict) -> bool:
+    checked = _parse_iso_datetime(raw.get("history_checked_at"))
+    if checked is None:
+        return True
+    now = datetime.now(checked.tzinfo) if checked.tzinfo is not None else datetime.now()
+    return (now - checked).total_seconds() >= max(60, int(settings.history_profile_refresh_seconds))
 
 
 def provider_factory():
@@ -481,7 +499,8 @@ async def _enrich_day_histories(
             status = str(raw.get("history_status") or "pending")
             already_checked = raw.get("history_enrichment_version") == HISTORY_ENRICHMENT_VERSION
             transient = status in {"pending", "loading", "unavailable"}
-            if not already_checked or transient:
+            stale = _history_profile_stale(raw)
+            if not already_checked or transient or stale:
                 jobs.append((
                     runner.id,
                     runner.race_id,
@@ -588,14 +607,42 @@ async def _enrich_day_histories(
                 finally:
                     db.close()
 
-    for runner_id, race_id, horse_id, horse_name, discipline, _scheduled_at in jobs:
-        # Persist a checkpoint before the network request. If a free cloud
-        # instance sleeps here, the next startup sees "loading" and resumes.
+    # Refresh horse profiles in small concurrent batches. Request starts are
+    # still throttled by OfficialHistoryClient, but network latency may overlap.
+    # Batching avoids retaining hundreds of full careers in RAM at once.
+    concurrency = max(1, min(int(settings.history_profile_fetch_concurrency), 8))
+    batch_size = max(concurrency, min(int(settings.history_profile_batch_size), 64))
+    semaphore = asyncio.Semaphore(concurrency)
+
+    async def fetch_profile(job):
+        runner_id, race_id, horse_id, horse_name, discipline, _scheduled_at = job
+        try:
+            async with semaphore:
+                payload = await provider.get_horse_history(
+                    horse_id or horse_name,
+                    discipline,
+                    horse_name=horse_name,
+                    race_date=day,
+                )
+            return runner_id, race_id, horse_name, payload if isinstance(payload, dict) else {}, None
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            return runner_id, race_id, horse_name, None, exc
+
+    for offset in range(0, len(jobs), batch_size):
+        batch = jobs[offset: offset + batch_size]
+        ids = [item[0] for item in batch]
+
         async with write_lock:
             db = SessionLocal()
             try:
-                runner = db.get(Runner, runner_id)
-                if runner is not None:
+                runners = db.scalars(select(Runner).where(Runner.id.in_(ids))).all()
+                by_id = {runner.id: runner for runner in runners}
+                for runner_id, _race_id, _horse_id, _horse_name, _discipline, _scheduled_at in batch:
+                    runner = by_id.get(runner_id)
+                    if runner is None:
+                        continue
                     raw = runner.raw if isinstance(runner.raw, dict) else {}
                     runner.raw = {
                         **raw,
@@ -603,36 +650,44 @@ async def _enrich_day_histories(
                         "history_attempts": int(raw.get("history_attempts") or 0) + 1,
                         "history_started_at": datetime.now().isoformat(),
                     }
-                    db.commit()
+                db.commit()
             finally:
                 db.close()
 
-        try:
-            payload = await provider.get_horse_history(
-                horse_id or horse_name,
-                discipline,
-                horse_name=horse_name,
-                race_date=day,
-            )
-            payload = payload if isinstance(payload, dict) else {}
-        except asyncio.CancelledError:
-            raise
-        except Exception as exc:
-            # One blocked or unavailable public profile must not cancel the
-            # other horses' enrichment.
-            print("history warning", day, horse_name, exc)
-            async with write_lock:
-                db = SessionLocal()
-                try:
-                    runner = db.scalar(
-                        select(Runner).where(Runner.id == runner_id).options(selectinload(Runner.history))
-                    )
-                    if runner is not None:
+        gathered = await asyncio.gather(
+            *(fetch_profile(job) for job in batch),
+            return_exceptions=True,
+        )
+        results = []
+        cancelled = False
+        for job, value in zip(batch, gathered):
+            if isinstance(value, asyncio.CancelledError):
+                cancelled = True
+                continue
+            if isinstance(value, BaseException):
+                runner_id, race_id, _horse_id, horse_name, _discipline, _scheduled_at = job
+                results.append((runner_id, race_id, horse_name, None, value))
+                continue
+            results.append(value)
+
+        async with write_lock:
+            db = SessionLocal()
+            try:
+                runners = db.scalars(
+                    select(Runner)
+                    .where(Runner.id.in_(ids))
+                    .options(selectinload(Runner.history))
+                ).all()
+                by_id = {runner.id: runner for runner in runners}
+                for runner_id, _race_id, horse_name, payload, exc in results:
+                    runner = by_id.get(runner_id)
+                    if runner is None:
+                        continue
+                    if exc is not None:
+                        print("history warning", day, horse_name, exc)
                         has_history = bool(runner.history)
                         runner.raw = {
                             **(runner.raw or {}),
-                            # Keep persisted factual rows usable without
-                            # pretending that this refresh completed.
                             "history_status": "partial" if has_history else "unavailable",
                             "history_warning": str(exc),
                             "history_last_error": str(exc),
@@ -640,24 +695,9 @@ async def _enrich_day_histories(
                             "history_checked_at": datetime.now().isoformat(),
                             "history_enrichment_version": HISTORY_ENRICHMENT_VERSION,
                         }
-                        db.commit()
-                except Exception:
-                    db.rollback()
-                    raise
-                finally:
-                    db.close()
-            continue
+                        continue
 
-        imported = 0
-        async with write_lock:
-            db = SessionLocal()
-            try:
-                runner = db.scalar(
-                    select(Runner)
-                    .where(Runner.id == runner_id)
-                    .options(selectinload(Runner.history))
-                )
-                if runner is not None:
+                    payload = payload or {}
                     imported = importer._replace_history(db, runner, payload)
                     meta = payload.get("meta", {}) if isinstance(payload, dict) else {}
                     runner.raw = {
@@ -669,37 +709,17 @@ async def _enrich_day_histories(
                         "history_last_error": None,
                         "history_enrichment_version": HISTORY_ENRICHMENT_VERSION,
                     }
-                    db.commit()
+                db.commit()
             except Exception:
                 db.rollback()
                 raise
             finally:
                 db.close()
 
-        # Release the full provider payload before loading the complete field
-        # for scoring. Persisted rows are now the source of truth.
-        payload = None
-        if imported:
-            async with write_lock:
-                db = SessionLocal()
-                try:
-                    race = db.scalar(
-                        select(Race)
-                        .where(Race.id == race_id)
-                        .options(
-                            selectinload(Race.runners).selectinload(Runner.history),
-                            selectinload(Race.meeting),
-                            selectinload(Race.snapshots),
-                            selectinload(Race.result),
-                        )
-                    )
-                    if race is not None and race.result is None:
-                        generate_analysis(db, race)
-                except Exception:
-                    db.rollback()
-                    raise
-                finally:
-                    db.close()
+        if cancelled:
+            # Successful profiles from the same bounded batch are already
+            # committed, so a Render shutdown can resume without losing work.
+            raise asyncio.CancelledError()
 
     return None
 
@@ -1043,28 +1063,59 @@ async def _prepare_race_analysis(
             db.close()
 
 
+async def _finalize_day_snapshots(day: date, write_lock: asyncio.Lock) -> None:
+    """Ensure every loaded race has a current-version persisted snapshot."""
+    db = SessionLocal()
+    try:
+        race_ids = db.scalars(
+            select(Race.id)
+            .join(Meeting)
+            .where(Meeting.race_date == day)
+            .order_by(Race.scheduled_at, Race.id)
+        ).all()
+    finally:
+        db.close()
+
+    for race_id in race_ids:
+        async with write_lock:
+            db = SessionLocal()
+            try:
+                race = db.scalar(
+                    select(Race)
+                    .where(Race.id == race_id)
+                    .options(
+                        selectinload(Race.meeting),
+                        selectinload(Race.runners).selectinload(Runner.history),
+                        selectinload(Race.snapshots),
+                        selectinload(Race.result),
+                    )
+                )
+                if race is None:
+                    continue
+                # Never create a post-result "pre-race" forecast. Existing locked
+                # or pre-race snapshots remain readable for finished races.
+                if race.result is None:
+                    generate_analysis(db, race)
+            except Exception:
+                db.rollback()
+                raise
+            finally:
+                db.close()
+
+
 async def _enrich_day_histories_safe(day: date, write_lock: asyncio.Lock) -> None:
+    provider = provider_factory()
     try:
         # Reuse one provider/client for the whole background run so its bounded
         # caches remain useful without growing unbounded.
-        provider = provider_factory()
-
-        # IMPORTANT: link one exact-race batch *before* the horse-profile sweep.
-        # On a warm database there can already be thousands of verified Geny
-        # course ids. Previously they all waited behind the last few slow or
-        # unavailable horse profiles, which made the UI sit at 0/N for a long
-        # time even though enough persisted data existed to start immediately.
-        # Drain every exact historical course already persisted *before* the
-        # remaining slow horse-profile lookups. On a warm production database
-        # this makes the visible opponent-network counter advance immediately.
         while True:
             remaining = bool(await _enrich_geny_course_details(day, write_lock, provider))
             if not remaining:
                 break
             await asyncio.sleep(0)
 
-        # Refresh each horse profile once. This may discover additional old
-        # course ids, which are drained in a second pass below.
+        # Refresh complete careers. Profiles already checked recently are skipped;
+        # stale profiles are revisited so a newly run race can be incorporated.
         await _enrich_day_histories(day, write_lock, provider)
 
         while True:
@@ -1072,10 +1123,45 @@ async def _enrich_day_histories_safe(day: date, write_lock: asyncio.Lock) -> Non
             if not remaining:
                 break
             await asyncio.sleep(0)
+
+        # Even on a warm cache with no new profile/network rows, a deployment can
+        # introduce a new methodology version. Build/reuse one current snapshot
+        # per race so UI clicks remain pure reads.
+        await _finalize_day_snapshots(day, write_lock)
     except asyncio.CancelledError:
         raise
     except Exception as exc:
         print("history enrichment warning", day, exc)
+    finally:
+        await _close_provider(provider)
+
+
+async def preload_loop(stop: asyncio.Event, write_lock: asyncio.Lock) -> None:
+    """Continuously prepare J0 and J+1 before the user opens HippoEdge.
+
+    The heavy work is sequential by day to avoid doubling provider/DB pressure.
+    Persisted factual histories and HistoricalRaceCache make subsequent passes
+    incremental: already-known data is reused, while stale horse profiles are
+    refreshed and only missing historical races are fetched.
+    """
+    if not settings.preload_enabled:
+        return
+    # Give the light programme importer a short head start on a cold deploy.
+    try:
+        await asyncio.wait_for(stop.wait(), timeout=5.0)
+        return
+    except asyncio.TimeoutError:
+        pass
+    while not stop.is_set():
+        today = date.today()
+        for target_day in (today, today + timedelta(days=1)):
+            if stop.is_set():
+                break
+            await _enrich_day_histories_safe(target_day, write_lock)
+        try:
+            await asyncio.wait_for(stop.wait(), timeout=max(60.0, float(settings.preload_refresh_seconds)))
+        except asyncio.TimeoutError:
+            pass
 
 
 async def maintenance_loop(
@@ -1083,10 +1169,11 @@ async def maintenance_loop(
     write_lock: asyncio.Lock,
     history_tasks: dict[date, asyncio.Task],
 ):
-    """Keep programme/results fresh without precomputing the whole day.
+    """Keep official cards/results fresh while preload_loop prepares analyses.
 
-    Heavy careers, historical-race linking and scoring now run only when the
-    user opens one race or explicitly launches the Selections page.
+    Programme and result updates stay periodic. Heavy career/network work is
+    performed by the separate sequential preload worker so the UI only reads
+    persisted, precomputed snapshots.
     """
     provider = provider_factory()
     importer = ImportService(provider)
@@ -1168,10 +1255,17 @@ async def lifespan(app: FastAPI):
             engine.dispose()
     stop=asyncio.Event(); write_lock=asyncio.Lock(); history_tasks: dict[date, asyncio.Task] = {}
     task=asyncio.create_task(maintenance_loop(stop,write_lock,history_tasks))
-    app.state.stop=stop; app.state.task=task; app.state.db_write_lock=write_lock; app.state.history_tasks=history_tasks
+    preload_task=asyncio.create_task(preload_loop(stop,write_lock))
+    app.state.stop=stop
+    app.state.task=task
+    app.state.preload_task=preload_task
+    app.state.db_write_lock=write_lock
+    app.state.history_tasks=history_tasks
     yield
-    stop.set(); task.cancel()
+    stop.set(); task.cancel(); preload_task.cancel()
     try: await task
+    except BaseException: pass
+    try: await preload_task
     except BaseException: pass
     for history_task in history_tasks.values():
         history_task.cancel()
@@ -1204,10 +1298,10 @@ def health():
 
 @app.post("/api/refresh")
 async def refresh(request: Request, day: date = Query(default_factory=date.today)):
-    """Refresh only the light official card/results.
+    """Refresh the light official card/results and queue background preparation.
 
-    Complete careers and the opponent network are intentionally *not* loaded
-    here. They start only from an explicit race/day analysis action.
+    The HTTP request returns quickly; complete careers, opponent-network linking
+    and snapshots continue in the background so later page opens are instant.
     """
     provider = provider_factory()
     importer = ImportService(provider)
@@ -1235,7 +1329,12 @@ async def refresh(request: Request, day: date = Query(default_factory=date.today
                     except Exception as exc:
                         db.rollback()
                         print("results warning", day, exc)
-                return {"ok": True, "date": day, "meetings": len(meetings), "mode": "on_demand"}
+                _schedule_history_enrichment(
+                    day,
+                    request.app.state.db_write_lock,
+                    request.app.state.history_tasks,
+                )
+                return {"ok": True, "date": day, "meetings": len(meetings), "mode": "preloaded_live"}
             finally:
                 db.close()
     finally:
@@ -1437,8 +1536,203 @@ def history_status(day: date, db: Session=Depends(get_db)):
         "historical_race_rows_pending":geny_course_pending,
         "historical_race_link_percent":round(geny_course_linked/geny_course_rows*100) if geny_course_rows else 0,
         "statuses":statuses,"sources":sources,"attempts":attempts,
-        "complete":bool(total) and detailed==total and geny_course_pending==0,
+        "checked_horses": total - int(statuses.get("pending", 0)) - int(statuses.get("loading", 0)),
+        # A debutant can be fully checked without having a past performance.
+        # "complete" means no profile/network lookup is still actively pending,
+        # not that every horse must magically possess history.
+        "complete":bool(total)
+        and int(statuses.get("pending", 0)) == 0
+        and int(statuses.get("loading", 0)) == 0
+        and geny_course_pending == 0,
     }
+
+
+
+def _horse_key(runner: Runner) -> str:
+    external = str(runner.horse_external_id or "").strip()
+    if external:
+        return f"id:{external}"
+    return f"name:{normalized_horse_name(runner.horse_name)}"
+
+
+def _future_engagements(day: date, db: Session) -> list[dict]:
+    horizon = day + timedelta(days=max(1, int(settings.future_engagement_days)))
+    todays = db.execute(
+        select(Runner, Race, Meeting)
+        .join(Race, Runner.race_id == Race.id)
+        .join(Meeting, Race.meeting_id == Meeting.id)
+        .where(Meeting.race_date == day, Runner.scratched.is_(False))
+        .order_by(Race.scheduled_at, Runner.number)
+    ).all()
+    if not todays:
+        return []
+
+    future_rows = db.execute(
+        select(Runner, Race, Meeting)
+        .join(Race, Runner.race_id == Race.id)
+        .join(Meeting, Race.meeting_id == Meeting.id)
+        .where(
+            Meeting.race_date >= day,
+            Meeting.race_date <= horizon,
+        )
+        .order_by(Race.scheduled_at, Runner.number)
+    ).all()
+
+    by_key: dict[str, list[tuple[Runner, Race, Meeting]]] = {}
+    for runner, race, meeting in future_rows:
+        by_key.setdefault(_horse_key(runner), []).append((runner, race, meeting))
+
+    result: list[dict] = []
+    seen_today: set[str] = set()
+    for runner, today_race, today_meeting in todays:
+        key = _horse_key(runner)
+        # A horse appearing in multiple cards today is listed once, from its
+        # earliest/current engagement.
+        today_unique = f"{key}|{today_race.id}"
+        if today_unique in seen_today:
+            continue
+        seen_today.add(today_unique)
+        candidates = [
+            (future_runner, future_race, future_meeting)
+            for future_runner, future_race, future_meeting in by_key.get(key, [])
+            if future_race.id != today_race.id
+            and future_race.scheduled_at > today_race.scheduled_at
+        ]
+        if not candidates:
+            continue
+        future_runner, future_race, future_meeting = candidates[0]
+        days_after = max(0, (future_meeting.race_date - day).days)
+        result.append(
+            {
+                "horse_name": runner.horse_name,
+                "horse_external_id": runner.horse_external_id,
+                "today": {
+                    "meeting_code": today_meeting.code,
+                    "track": today_meeting.track,
+                    "race_id": today_race.id,
+                    "race_code": today_race.code,
+                    "scheduled_at": today_race.scheduled_at.isoformat(),
+                },
+                "next": {
+                    "date": future_meeting.race_date.isoformat(),
+                    "days_after": days_after,
+                    "meeting_code": future_meeting.code,
+                    "track": future_meeting.track,
+                    "race_id": future_race.id,
+                    "race_code": future_race.code,
+                    "race_name": future_race.name,
+                    "scheduled_at": future_race.scheduled_at.isoformat(),
+                    "discipline": future_race.discipline,
+                    "distance_m": future_race.distance_m,
+                    "status": "non_partant" if future_runner.scratched else "au_programme",
+                },
+                "known_future_count": len(candidates),
+            }
+        )
+    result.sort(key=lambda item: (item["next"]["scheduled_at"], item["horse_name"]))
+    return result
+
+
+@app.get("/api/day/{day}/dashboard")
+def day_dashboard(day: date, db: Session = Depends(get_db)):
+    """Persistent daily activity/readiness plus known future engagements."""
+    races = db.scalars(
+        select(Race)
+        .join(Meeting)
+        .where(Meeting.race_date == day)
+        .options(selectinload(Race.runners), selectinload(Race.snapshots))
+        .order_by(Race.scheduled_at, Race.id)
+    ).all()
+    total_races = len(races)
+    total_horse_keys = {
+        _horse_key(runner)
+        for race in races
+        for runner in race.runners
+        if not runner.scratched
+    }
+
+    ready_races: list[Race] = []
+    analyzed_horse_keys: set[str] = set()
+    latest_snapshot_at: datetime | None = None
+    total_snapshots = 0
+    for race in races:
+        current = [
+            snap
+            for snap in race.snapshots
+            if snap.methodology_version == settings.methodology_version
+        ]
+        total_snapshots += len(current)
+        snap = max(current, key=lambda item: item.generated_at, default=None)
+        if snap is None:
+            continue
+        ready_races.append(race)
+        latest_snapshot_at = max(
+            latest_snapshot_at or snap.generated_at,
+            snap.generated_at,
+        )
+        analyzed_horse_keys.update(
+            _horse_key(runner)
+            for runner in race.runners
+            if not runner.scratched
+        )
+
+    quality = history_status(day, db)
+    day_ready = bool(total_races) and len(ready_races) == total_races and bool(quality.get("complete"))
+    engagements = _future_engagements(day, db)
+    future_dates = db.scalars(
+        select(Meeting.race_date)
+        .where(
+            Meeting.race_date > day,
+            Meeting.race_date <= day + timedelta(days=max(1, int(settings.future_engagement_days))),
+        )
+        .distinct()
+        .order_by(Meeting.race_date)
+    ).all()
+    cached_historical_races = int(
+        db.scalar(select(func.count()).select_from(HistoricalRaceCache).where(HistoricalRaceCache.status == "ok"))
+        or 0
+    )
+    return {
+        "date": day.isoformat(),
+        "status": "ready" if day_ready else "updating",
+        "ready": day_ready,
+        "activity": {
+            "courses_total": total_races,
+            "courses_analyzed": len(ready_races),
+            "courses_updating": max(0, total_races - len(ready_races)),
+            "horses_total": len(total_horse_keys),
+            "horses_analyzed": len(analyzed_horse_keys),
+            "analysis_runs_current_version": total_snapshots,
+            "historical_rows_linked": int(quality.get("historical_race_rows_linked") or 0),
+            "historical_rows_total": int(quality.get("historical_race_rows") or 0),
+            "historical_rows_pending": int(quality.get("historical_race_rows_pending") or 0),
+            "profiles_checked": int(quality.get("checked_horses") or 0),
+            "profiles_total": int(quality.get("total_horses") or 0),
+            "cached_historical_races_global": cached_historical_races,
+            "last_analysis_at": latest_snapshot_at.isoformat() if latest_snapshot_at else None,
+        },
+        "engagements": {
+            "count": len(engagements),
+            "within_3_days": sum(1 for item in engagements if item["next"]["days_after"] <= 3),
+            "within_7_days": sum(1 for item in engagements if item["next"]["days_after"] <= 7),
+            "within_14_days": sum(1 for item in engagements if item["next"]["days_after"] <= 14),
+            "within_30_days": len(engagements),
+            "program_days_loaded": len(future_dates),
+            "programs_known_through": max(future_dates).isoformat() if future_dates else None,
+            "items": engagements,
+        },
+        "data_quality": quality,
+    }
+
+
+@app.post("/api/day/{day}/prepare")
+async def prepare_day(request: Request, day: date):
+    """Start/ensure background preparation without holding the HTTP request."""
+    tasks: dict[date, asyncio.Task] = request.app.state.history_tasks
+    current = tasks.get(day)
+    if current is None or current.done():
+        tasks[day] = asyncio.create_task(_enrich_day_histories_safe(day, request.app.state.db_write_lock))
+    return {"ok": True, "date": day.isoformat(), "status": "preparing"}
 
 
 @app.post("/api/races/{race_id}/analyze", response_model=AnalysisOut)
@@ -1512,22 +1806,85 @@ async def analyze_day_selections_on_demand(request: Request, day: date):
         await _close_provider(provider)
 
 
+def _analysis_out_from_snapshot(db: Session, race: Race, snap: AnalysisSnapshot) -> AnalysisOut:
+    scores = db.scalars(
+        select(RunnerScore)
+        .where(RunnerScore.snapshot_id == snap.id)
+        .options(selectinload(RunnerScore.runner))
+    ).all()
+    return AnalysisOut(
+        snapshot_id=snap.id,
+        race_id=race.id,
+        generated_at=snap.generated_at,
+        methodology_version=snap.methodology_version,
+        locked=snap.locked,
+        confirmation=CONFIRMATION,
+        summary=snap.summary,
+        result=race.result,
+        scores=[
+            ScoreOut(
+                number=score.runner.number,
+                horse_name=score.runner.horse_name,
+                performance=score.performance,
+                placed=score.placed,
+                hidden_potential=score.hidden_potential,
+                robustness=score.robustness,
+                uncertainty=score.uncertainty,
+                line_strength=score.line_strength,
+                reasons=score.reasons,
+                breakdown=score.breakdown,
+            )
+            for score in sorted(scores, key=lambda item: item.performance, reverse=True)
+        ],
+    )
+
+
 @app.get("/api/races/{race_id}/analysis", response_model=AnalysisOut)
 async def analysis(request: Request, race_id: int, force: bool = False):
-    # Backward-compatible route: older mobile bundles also receive the new
-    # on-demand behavior instead of accidentally reintroducing day-wide work.
-    provider = provider_factory()
+    """Return the precomputed snapshot instantly.
+
+    Normal UI reads never download careers or rebuild the opponent graph.  The
+    background preload worker owns that heavy work.  `force=true` remains an
+    explicit maintenance fallback for administrators/older clients.
+    """
+    if force:
+        provider = provider_factory()
+        try:
+            return await _prepare_race_analysis(
+                race_id,
+                request.app.state.db_write_lock,
+                provider,
+                request,
+            )
+        finally:
+            await _close_provider(provider)
+
+    db = SessionLocal()
     try:
-        return await _prepare_race_analysis(
-            race_id,
-            request.app.state.db_write_lock,
-            provider,
-            request,
+        race = db.scalar(
+            select(Race)
+            .where(Race.id == race_id)
+            .options(
+                selectinload(Race.snapshots),
+                selectinload(Race.result),
+            )
         )
-    except asyncio.CancelledError:
-        raise HTTPException(status_code=499, detail="Analyse annulée : page quittée")
+        if race is None:
+            raise HTTPException(404, "Course introuvable")
+        current = [
+            snap for snap in race.snapshots
+            if snap.methodology_version == settings.methodology_version
+            and (is_pre_race_snapshot(race, snap) or race.result is not None)
+        ]
+        snap = max(current, key=lambda item: item.generated_at, default=None)
+        if snap is None:
+            raise HTTPException(
+                status_code=409,
+                detail="Analyse en préparation automatique. HippoEdge l'affichera dès que la journée sera prête.",
+            )
+        return _analysis_out_from_snapshot(db, race, snap)
     finally:
-        await _close_provider(provider)
+        db.close()
 
 
 @app.post("/api/races/{race_id}/lock")
