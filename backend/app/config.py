@@ -24,6 +24,8 @@ class Settings(BaseSettings):
     history_course_cache_size: int = 128
     history_directory_cache_size: int = 4
     history_course_batch_size: int = 120
+    # Exact historical-course downloads can overlap, while request starts remain throttled.
+    history_course_fetch_concurrency: int = 8
     # Failed historical-race lookups are retried on later maintenance passes instead of being abandoned forever.
     history_course_retry_cooldown_seconds: int = 900
     selection_min_history_rows: int = 3
@@ -33,7 +35,7 @@ class Settings(BaseSettings):
     timezone: str = "Europe/Paris"
     refresh_seconds: int = 900
     auto_lock_minutes_before: int = 2
-    methodology_version: str = "2026.09.04-v6.9.1-complete"
+    methodology_version: str = "2026.09.04-v6.9.2-speed"
     cors_origins: str = "*"
 
     model_config = SettingsConfigDict(

@@ -816,6 +816,14 @@ class OfficialHistoryClient:
         self._geny_directory_cache: OrderedDict[str, str] = OrderedDict()
         self._request_lock = asyncio.Lock()
         self._last_request_at = 0.0
+        # Reuse HTTP connections for the whole worker. Opening a fresh TLS
+        # connection for every one of thousands of historical races dominated
+        # the ingestion time. The pool is deliberately small and bounded.
+        self._http_client = httpx.AsyncClient(
+            timeout=25,
+            follow_redirects=True,
+            limits=httpx.Limits(max_connections=12, max_keepalive_connections=12),
+        )
         self._letrot_blocked_reason: str | None = None
 
     @staticmethod
@@ -836,36 +844,39 @@ class OfficialHistoryClient:
     def _is_trot(discipline: str | None) -> bool:
         return "trot" in (discipline or "").lower() or "attel" in (discipline or "").lower() or "mont" in (discipline or "").lower()
 
-    async def _get_html(self, url: str) -> str:
+    async def _wait_request_slot(self) -> None:
+        """Throttle request *starts* without serialising network latency.
+
+        The previous lock stayed held until the remote server answered, which
+        made every historical course strictly sequential. We still respect the
+        configured interval between starts, but completed requests may overlap.
+        """
         async with self._request_lock:
             remaining = self.request_interval_seconds - (time.monotonic() - self._last_request_at)
             if remaining > 0:
                 await asyncio.sleep(remaining)
-            headers = {
-                "Accept": "text/html,application/xhtml+xml",
-                "Accept-Language": "fr-FR,fr;q=0.9",
-                "User-Agent": "HippoEdge/1.0 (usage personnel; lecture seule)",
-            }
-            async with httpx.AsyncClient(timeout=25, follow_redirects=True) as client:
-                response = await client.get(url, headers=headers)
             self._last_request_at = time.monotonic()
+
+    async def _get_html(self, url: str) -> str:
+        await self._wait_request_slot()
+        headers = {
+            "Accept": "text/html,application/xhtml+xml",
+            "Accept-Language": "fr-FR,fr;q=0.9",
+            "User-Agent": "HippoEdge/1.0 (usage personnel; lecture seule)",
+        }
+        response = await self._http_client.get(url, headers=headers)
         if response.status_code >= 400:
             raise ProviderError(f"Source historique {response.status_code}: {url}")
         return response.text
 
     async def _get_json(self, url: str, params: dict[str, Any] | None = None) -> Any:
-        async with self._request_lock:
-            remaining = self.request_interval_seconds - (time.monotonic() - self._last_request_at)
-            if remaining > 0:
-                await asyncio.sleep(remaining)
-            headers = {
-                "Accept": "application/json",
-                "Accept-Language": "fr-FR,fr;q=0.9",
-                "User-Agent": "HippoEdge/1.0 (usage personnel; lecture seule)",
-            }
-            async with httpx.AsyncClient(timeout=25, follow_redirects=True) as client:
-                response = await client.get(url, params=params or {}, headers=headers)
-            self._last_request_at = time.monotonic()
+        await self._wait_request_slot()
+        headers = {
+            "Accept": "application/json",
+            "Accept-Language": "fr-FR,fr;q=0.9",
+            "User-Agent": "HippoEdge/1.0 (usage personnel; lecture seule)",
+        }
+        response = await self._http_client.get(url, params=params or {}, headers=headers)
         if response.status_code >= 400:
             raise ProviderError(f"Source historique JSON {response.status_code}: {url}")
         try:

@@ -373,3 +373,63 @@ def test_exact_geny_course_is_downloaded_once_and_attached_to_every_matching_his
     assert runners[0].raw["opponent_network_status"]=="complete"
     assert runners[0].raw["geny_course_rows_linked"]==1
     check.close()
+
+
+def test_exact_geny_batches_fetch_in_bounded_parallel_without_cutting_history():
+    engine=create_engine("sqlite://",connect_args={"check_same_thread":False},poolclass=StaticPool)
+    Base.metadata.create_all(engine)
+    Session=sessionmaker(bind=engine,expire_on_commit=False)
+    day=date.today()+timedelta(days=1)
+    db=Session()
+    meeting=Meeting(race_date=day,code="R1",track="Test")
+    race=Race(
+        meeting=meeting,code="R1C1",name="Course",
+        scheduled_at=datetime.now()+timedelta(hours=2),discipline="Plat",distance_m=2000,
+    )
+    runner=Runner(number=1,horse_name="ALPHA",horse_external_id="pmu-alpha",raw={"history_status":"ok"})
+    runner.history=[
+        HorseHistory(
+            race_date=day-timedelta(days=index+1),track="Ancien",race_code=f"Prix {index}",distance_m=1800,
+            position=1,opponents=[],raw={"geny_course_id":str(1000+index),"geny_horse_id":"101"},
+        )
+        for index in range(130)
+    ]
+    race.runners=[runner]
+    db.add(race); db.commit(); db.close()
+
+    class Provider:
+        def __init__(self):
+            self.active=0
+            self.max_active=0
+
+        async def get_historical_course(self,course_id):
+            self.active+=1
+            self.max_active=max(self.max_active,self.active)
+            try:
+                await asyncio.sleep(0.002)
+                return {
+                    "data":{"course_id":str(course_id),"participants":[
+                        {"horse_name":"ALPHA","geny_horse_id":"101","position":1},
+                        {"horse_name":"BETA","geny_horse_id":"202","position":2},
+                    ]},
+                    "meta":{"source":"Geny course détaillée","status":"ok"},
+                }
+            finally:
+                self.active-=1
+
+    provider=Provider()
+    with patch("app.main.SessionLocal",Session):
+        remaining=asyncio.run(_enrich_geny_course_details(day,asyncio.Lock(),provider))
+    assert remaining is True
+    assert 1 < provider.max_active <= 8
+
+    check=Session()
+    linked=0
+    pending=0
+    for history in check.scalars(select(HorseHistory)).all():
+        status=(history.raw or {}).get("geny_course_lookup_status")
+        linked+=int(status=="ok")
+        pending+=int(status is None)
+    check.close()
+    assert linked==120
+    assert pending==10

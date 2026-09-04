@@ -120,12 +120,12 @@ def _recent_lookup_failure(raw: dict) -> bool:
 
 
 async def _enrich_geny_course_details(day: date, write_lock: asyncio.Lock, provider: object) -> bool:
-    """Progressively attach every runner from exact Geny historical races.
+    """Attach exact historical-race participants in bounded parallel batches.
 
-    Career pages are downloaded first and committed horse by horse. This second
-    pass groups the stored Geny course ids, so one old race shared by several
-    current runners is requested only once. Every course is committed
-    separately; a sleeping free host can resume at the first unfinished id.
+    The source remains request-throttled by OfficialHistoryClient.  Here we only
+    stop wasting time by waiting for one remote response before starting the
+    next request, and we persist one whole batch in one transaction.  Complete
+    histories and A→B→C→D semantics are unchanged.
     """
     detail_method = getattr(provider, "get_historical_course", None)
     if not callable(detail_method):
@@ -133,10 +133,6 @@ async def _enrich_geny_course_details(day: date, write_lock: asyncio.Lock, provi
 
     db = SessionLocal()
     try:
-        # Read only the three columns needed to plan the batch. Loading every
-        # HorseHistory ORM object also loaded its potentially large opponents
-        # JSON, which could retain an entire day's careers in RAM before the
-        # first historical-course request was made.
         history_rows = db.execute(
             select(HorseHistory.id, HorseHistory.race_date, HorseHistory.raw)
             .join(Runner)
@@ -152,11 +148,8 @@ async def _enrich_geny_course_details(day: date, write_lock: asyncio.Lock, provi
             if not course_id.isdigit():
                 continue
             status = str(raw.get("geny_course_lookup_status") or "")
-            attempts = int(raw.get("geny_course_lookup_attempts") or 0)
             if status == "ok" or status in {"no_participants", "identity_mismatch"}:
                 continue
-            # Transient network/provider failures are never abandoned permanently.
-            # A short cooldown prevents a tight retry loop inside one background run.
             if _recent_lookup_failure(raw):
                 continue
             grouped.setdefault(course_id, []).append(history_id)
@@ -168,23 +161,41 @@ async def _enrich_geny_course_details(day: date, write_lock: asyncio.Lock, provi
     batch_size = max(1, min(int(settings.history_course_batch_size), 500))
     selected_ids = ordered_ids[:batch_size]
     pending_after_batch = len(ordered_ids) > len(selected_ids)
+    if not selected_ids:
+        return False
 
-    for course_id in selected_ids:
+    concurrency = max(1, min(int(settings.history_course_fetch_concurrency), 16))
+    semaphore = asyncio.Semaphore(concurrency)
+
+    async def fetch_one(course_id: str) -> tuple[str, dict | None, Exception | None]:
         try:
-            payload = await detail_method(course_id)
-            payload = payload if isinstance(payload, dict) else {}
-            participants = payload.get("data", {}).get("participants", [])
-            if not isinstance(participants, list):
-                participants = []
-            source_status = str(payload.get("meta", {}).get("status") or "")
+            async with semaphore:
+                payload = await detail_method(course_id)
+            return course_id, payload if isinstance(payload, dict) else {}, None
         except asyncio.CancelledError:
             raise
         except Exception as exc:
-            async with write_lock:
-                db = SessionLocal()
-                try:
+            return course_id, None, exc
+
+    # Fetch concurrently, but with a bounded semaphore. The provider itself
+    # still spaces request starts, so this is faster without becoming a burst.
+    results = await asyncio.gather(*(fetch_one(course_id) for course_id in selected_ids))
+
+    async with write_lock:
+        db = SessionLocal()
+        try:
+            target_ids = [history_id for course_id in selected_ids for history_id in grouped[course_id]]
+            histories = db.scalars(
+                select(HorseHistory)
+                .where(HorseHistory.id.in_(target_ids))
+                .options(selectinload(HorseHistory.runner))
+            ).all()
+            by_id = {history.id: history for history in histories}
+
+            for course_id, payload, exc in results:
+                if exc is not None:
                     for history_id in grouped[course_id]:
-                        history = db.get(HorseHistory, history_id)
+                        history = by_id.get(history_id)
                         if history is None:
                             continue
                         raw = history.raw if isinstance(history.raw, dict) else {}
@@ -196,23 +207,16 @@ async def _enrich_geny_course_details(day: date, write_lock: asyncio.Lock, provi
                             "geny_course_lookup_warning": str(exc),
                             "geny_course_checked_at": datetime.now().isoformat(),
                         }
-                    db.commit()
-                except Exception:
-                    db.rollback()
-                    raise
-                finally:
-                    db.close()
-            continue
+                    continue
 
-        async with write_lock:
-            db = SessionLocal()
-            try:
+                payload = payload or {}
+                participants = payload.get("data", {}).get("participants", [])
+                if not isinstance(participants, list):
+                    participants = []
+                source_status = str(payload.get("meta", {}).get("status") or "")
+
                 for history_id in grouped[course_id]:
-                    history = db.scalar(
-                        select(HorseHistory)
-                        .where(HorseHistory.id == history_id)
-                        .options(selectinload(HorseHistory.runner))
-                    )
+                    history = by_id.get(history_id)
                     if history is None:
                         continue
                     raw = history.raw if isinstance(history.raw, dict) else {}
@@ -246,10 +250,7 @@ async def _enrich_geny_course_details(day: date, write_lock: asyncio.Lock, provi
                     else:
                         lookup_status = "ok"
                         history.opponents = _merge_objective_opponents(
-                            history.opponents or [],
-                            participants,
-                            own_name,
-                            own_id,
+                            history.opponents or [], participants, own_name, own_id
                         )
                         if history.position is None and not history.disqualified:
                             own_position = to_int(own.get("position"))
@@ -267,31 +268,28 @@ async def _enrich_geny_course_details(day: date, write_lock: asyncio.Lock, provi
                         "geny_course_checked_at": datetime.now().isoformat(),
                         "geny_course_lookup_warning": None,
                     }
-                db.commit()
-            except Exception:
-                db.rollback()
-                raise
-            finally:
-                db.close()
+            db.commit()
+        except Exception:
+            db.rollback()
+            raise
+        finally:
+            db.close()
+
+    # Do not re-load all 633 careers and regenerate every race after every
+    # 120-course batch. That O(day × batches) work was a major bottleneck.
+    # history-status reads HorseHistory.raw directly, so progress still updates
+    # immediately. Finalise runners/snapshots once, after the last batch.
+    if pending_after_batch:
+        return True
 
     async with write_lock:
-        # Finalize one horse at a time, then analyse one race at a time.  The
-        # former all-day query retained every runner career plus every old
-        # snapshot/score in the same SQLAlchemy identity map.  This preserves
-        # the complete published histories and A→B→C→D method while bounding the
-        # working set to one horse/race.
         db = SessionLocal()
         try:
             runner_ids = db.scalars(
-                select(Runner.id)
-                .join(Race)
-                .join(Meeting)
-                .where(Meeting.race_date == day)
+                select(Runner.id).join(Race).join(Meeting).where(Meeting.race_date == day)
             ).all()
             race_ids = db.scalars(
-                select(Race.id)
-                .join(Meeting)
-                .where(Meeting.race_date == day)
+                select(Race.id).join(Meeting).where(Meeting.race_date == day)
             ).all()
         finally:
             db.close()
@@ -300,9 +298,7 @@ async def _enrich_geny_course_details(day: date, write_lock: asyncio.Lock, provi
             db = SessionLocal()
             try:
                 runner = db.scalar(
-                    select(Runner)
-                    .where(Runner.id == runner_id)
-                    .options(selectinload(Runner.history))
+                    select(Runner).where(Runner.id == runner_id).options(selectinload(Runner.history))
                 )
                 if runner is None:
                     continue
@@ -363,7 +359,7 @@ async def _enrich_geny_course_details(day: date, write_lock: asyncio.Lock, provi
                 raise
             finally:
                 db.close()
-    return pending_after_batch
+    return False
 
 
 async def _enrich_day_histories(
@@ -644,21 +640,19 @@ async def _enrich_day_histories_safe(day: date, write_lock: asyncio.Lock) -> Non
         # course ids. Previously they all waited behind the last few slow or
         # unavailable horse profiles, which made the UI sit at 0/N for a long
         # time even though enough persisted data existed to start immediately.
-        remaining = bool(await _enrich_geny_course_details(day, write_lock, provider))
+        # Drain every exact historical course already persisted *before* the
+        # remaining slow horse-profile lookups. On a warm production database
+        # this makes the visible opponent-network counter advance immediately.
+        while True:
+            remaining = bool(await _enrich_geny_course_details(day, write_lock, provider))
+            if not remaining:
+                break
+            await asyncio.sleep(0)
 
-        # Refresh each horse profile once for this task. Do not run the same
-        # profile sweep again for every 120-course network batch. That old loop
-        # repeatedly retried the same slow profiles and could starve the exact
-        # opponent linking work.
+        # Refresh each horse profile once. This may discover additional old
+        # course ids, which are drained in a second pass below.
         await _enrich_day_histories(day, write_lock, provider)
 
-        # The profile sweep may have added more Geny course ids. Continue in
-        # bounded batches until every stored historical race is linked or has
-        # reached a terminal checked state. There is deliberately no fixed
-        # 50-pass ceiling: 120 * 50 = 6000, while a normal full day can exceed
-        # that (the production example already contains more than 7000 rows).
-        # Memory remains bounded by _enrich_geny_course_details' batch size and
-        # cancellation is immediate when Render stops the worker.
         while True:
             remaining = bool(await _enrich_geny_course_details(day, write_lock, provider))
             if not remaining:
