@@ -116,6 +116,9 @@ class PmuProvider(RacingProvider):
             directory_cache_size=history_directory_cache_size,
         )
 
+    async def aclose(self) -> None:
+        await self.history_client.aclose()
+
     async def _get(self, path: str, params: dict[str, Any] | None = None) -> dict[str, Any]:
         headers = {"Accept": "application/json", "User-Agent": "HippoEdge/1.0 (personal read-only client)"}
         async with httpx.AsyncClient(timeout=30, follow_redirects=True) as client:

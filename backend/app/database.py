@@ -29,12 +29,15 @@ if not is_sqlite:
     # ceiling. SQLAlchemy's default QueuePool can reach 5 + 10 overflow
     # connections *per Render instance*. During a rolling deploy the old and
     # new instances overlap, which can exhaust that ceiling before startup.
-    # HippoEdge serialises database writes and does not need a large DB pool,
-    # so keep it deliberately small. This limits connections, not data depth.
+    # HippoEdge can keep one connection checked out while a programme import awaits
+    # remote race data, while the UI simultaneously performs programme/history/
+    # selection reads. A pool of four fixed sessions avoids starving the API.
+    # With one worker and Render rolling deploy overlap, 4 + 4 stays below the
+    # Supabase session-pooler ceiling of 15. This limits connections, not data depth.
     engine_kwargs.update(
         pool_size=max(1, int(settings.database_pool_size)),
         max_overflow=max(0, int(settings.database_max_overflow)),
-        pool_timeout=5,
+        pool_timeout=30,
         pool_recycle=120,
         pool_use_lifo=True,
     )

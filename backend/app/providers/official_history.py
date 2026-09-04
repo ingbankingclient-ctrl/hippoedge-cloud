@@ -826,6 +826,10 @@ class OfficialHistoryClient:
         )
         self._letrot_blocked_reason: str | None = None
 
+    async def aclose(self) -> None:
+        """Release the persistent HTTP pool used by this provider instance."""
+        await self._http_client.aclose()
+
     @staticmethod
     def _cache_get(cache: OrderedDict, key: Any) -> Any | None:
         value = cache.get(key)

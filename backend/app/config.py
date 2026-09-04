@@ -12,7 +12,10 @@ class Settings(BaseSettings):
     # Keep the SQLAlchemy client pool well below Supabase session-pooler limits.
     # Render briefly overlaps old/new instances during deploys, so a small pool
     # prevents startup failures while preserving normal API/background work.
-    database_pool_size: int = 1
+    # Four fixed connections leave room for one long import session plus
+    # concurrent API reads, while two overlapping Render instances still stay
+    # below Supabase's 15-session ceiling (4 + 4 = 8).
+    database_pool_size: int = 4
     database_max_overflow: int = 0
     provider: str = "demo"  # demo | pmu | turfbzh
     pmu_base_url: str = "https://online.turfinfo.api.pmu.fr/rest/client/1"
@@ -31,6 +34,8 @@ class Settings(BaseSettings):
     history_course_batch_size: int = 120
     # Exact historical-course downloads can overlap, while request starts remain throttled.
     history_course_fetch_concurrency: int = 8
+    # Horse-profile requests for one clicked race may overlap, while request starts remain throttled.
+    history_profile_fetch_concurrency: int = 4
     # Failed historical-race lookups are retried on later maintenance passes instead of being abandoned forever.
     history_course_retry_cooldown_seconds: int = 900
     selection_min_history_rows: int = 3
@@ -40,7 +45,7 @@ class Settings(BaseSettings):
     timezone: str = "Europe/Paris"
     refresh_seconds: int = 900
     auto_lock_minutes_before: int = 2
-    methodology_version: str = "2026.09.04-v6.9.4-rolling-startup"
+    methodology_version: str = "2026.09.04-v6.9.6-on-demand"
     cors_origins: str = "*"
 
     model_config = SettingsConfigDict(

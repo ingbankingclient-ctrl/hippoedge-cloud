@@ -15,9 +15,11 @@ export const Api={
   tomorrow:()=>req<Meeting[]>('/api/tomorrow'),
   program:(day:string)=>req<Meeting[]>(`/api/program/${day}`),
   selections:(day:string)=>req<any>(`/api/day/${day}/selections`),
+  analyzeSelections:(day:string,signal?:AbortSignal)=>req<any>(`/api/day/${day}/analyze-selections`,{method:'POST',signal}),
   historyStatus:(day:string)=>req<any>(`/api/day/${day}/history-status`),
   refresh:(day:string)=>req<any>(`/api/refresh?day=${day}`,{method:'POST'}),
   analysis:(id:number,force=false)=>req<Analysis>(`/api/races/${id}/analysis?force=${force}`),
+  analyzeRace:(id:number,signal?:AbortSignal)=>req<Analysis>(`/api/races/${id}/analyze`,{method:'POST',signal}),
   lock:(id:number)=>req<any>(`/api/races/${id}/lock`,{method:'POST'}),
   stats:()=>req<any>('/api/stats'),
   health:()=>req<any>('/health')

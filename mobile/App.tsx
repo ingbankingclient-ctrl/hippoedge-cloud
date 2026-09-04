@@ -1,4 +1,4 @@
-import React, {useEffect, useMemo, useState} from 'react';
+import React, {useEffect, useMemo, useRef, useState} from 'react';
 import {
   ActivityIndicator,
   Alert,
@@ -289,97 +289,115 @@ export default function App() {
   const [health, setHealth] = useState<any>(null);
   const [dayOffset, setDayOffset] = useState<0 | 1>(0);
   const [selections, setSelections] = useState<any>(null);
-  const [historyStatus, setHistoryStatus] = useState<any>(null);
+  const [selectionRunning, setSelectionRunning] = useState(false);
+  const raceAbortRef = useRef<AbortController | null>(null);
+  const selectionAbortRef = useRef<AbortController | null>(null);
 
   useEffect(() => {
     getBaseUrl().then(setUrl);
     loadProgram();
+    return () => {
+      raceAbortRef.current?.abort();
+      selectionAbortRef.current?.abort();
+    };
   }, []);
-
-  useEffect(() => {
-    const statuses = historyStatus?.statuses || {};
-    const stillRunning = (
-      Number(statuses.pending || 0)
-      + Number(statuses.loading || 0)
-      + Number(historyStatus?.historical_race_rows_pending || 0)
-    ) > 0;
-    if (!stillRunning) return;
-    const timer = setInterval(async () => {
-      const day = localISO(dayOffset);
-      try {
-        const [status, picks] = await Promise.all([Api.historyStatus(day), Api.selections(day)]);
-        setHistoryStatus(status);
-        setSelections(picks);
-      } catch {
-        // The regular error card remains driven by explicit user actions. A
-        // transient polling failure must not replace data already on screen.
-      }
-    }, 6000);
-    return () => clearInterval(timer);
-  }, [dayOffset, historyStatus?.statuses?.pending, historyStatus?.statuses?.loading, historyStatus?.historical_race_rows_pending]);
 
   async function loadProgram(offset: 0 | 1 = dayOffset) {
     setLoading(true);
     setError('');
-    const day = localISO(offset);
-    const failures: string[] = [];
-    const programTask = Api.program(day)
-      .then(program => setMeetings(normalizeMeetings(program)))
-      .catch((e: any) => {
-        setMeetings([]);
-        failures.push(`Programme : ${e?.message || String(e)}`);
-      });
-    const selectionsTask = Api.selections(day)
-      .then(picks => setSelections(picks))
-      .catch((e: any) => {
-        setSelections(null);
-        failures.push(`Sélections : ${e?.message || String(e)}`);
-      });
-    const historyTask = Api.historyStatus(day)
-      .then(status => setHistoryStatus(status))
-      .catch((e: any) => {
-        setHistoryStatus(null);
-        failures.push(`Historiques : ${e?.message || String(e)}`);
-      });
-    await Promise.all([programTask, selectionsTask, historyTask]);
-    if (failures.length) setError(failures.join(' · '));
-    setLoading(false);
+    try {
+      const program = await Api.program(localISO(offset));
+      setMeetings(normalizeMeetings(program));
+    } catch (e: any) {
+      setMeetings([]);
+      setError(`Programme : ${e?.message || String(e)}`);
+    } finally {
+      setLoading(false);
+    }
   }
 
   async function chooseDay(offset: 0 | 1) {
+    selectionAbortRef.current?.abort();
+    selectionAbortRef.current = null;
+    setSelections(null);
+    setSelectionRunning(false);
     setDayOffset(offset);
     await loadProgram(offset);
   }
 
   async function refresh() {
+    selectionAbortRef.current?.abort();
+    selectionAbortRef.current = null;
+    setSelections(null);
     setLoading(true);
     setError('');
-    let refreshError = '';
     try {
       await Api.refresh(localISO(dayOffset));
+      const program = await Api.program(localISO(dayOffset));
+      setMeetings(normalizeMeetings(program));
     } catch (e: any) {
-      refreshError = e?.message || String(e);
+      setError(`Actualisation : ${e?.message || String(e)}`);
+    } finally {
+      setLoading(false);
     }
-    await loadProgram(dayOffset);
-    if (refreshError) setError(`Actualisation : ${refreshError}`);
   }
 
-  async function openRace(race: Race, force = false) {
+  async function openRace(race: Race) {
+    raceAbortRef.current?.abort();
+    const controller = new AbortController();
+    raceAbortRef.current = controller;
     setSelected(race);
     setAnalysis(null);
     setLoading(true);
     setError('');
     try {
-      const loaded = await Api.analysis(race.id, force);
+      const loaded = await Api.analyzeRace(race.id, controller.signal);
+      if (controller.signal.aborted) return;
       setAnalysis(loaded);
       if (loaded.result && !race.result) {
         setSelected({...race, result: loaded.result});
       }
     } catch (e: any) {
-      setError(e.message);
+      if (controller.signal.aborted || e?.name === 'AbortError') return;
+      setError(e?.message || String(e));
     } finally {
+      if (raceAbortRef.current === controller) raceAbortRef.current = null;
+      if (!controller.signal.aborted) setLoading(false);
+    }
+  }
+
+  async function runSelections() {
+    selectionAbortRef.current?.abort();
+    const controller = new AbortController();
+    selectionAbortRef.current = controller;
+    setSelections(null);
+    setSelectionRunning(true);
+    setLoading(true);
+    setError('');
+    try {
+      await Api.refresh(localISO(dayOffset));
+      const picks = await Api.analyzeSelections(localISO(dayOffset), controller.signal);
+      if (!controller.signal.aborted) setSelections(picks);
+    } catch (e: any) {
+      if (controller.signal.aborted || e?.name === 'AbortError') return;
+      setError(e?.message || String(e));
+    } finally {
+      if (selectionAbortRef.current === controller) selectionAbortRef.current = null;
+      setSelectionRunning(false);
+      if (!controller.signal.aborted) setLoading(false);
+    }
+  }
+
+  function switchTab(next: Tab) {
+    if (tab === 'selections' && next !== 'selections') {
+      selectionAbortRef.current?.abort();
+      selectionAbortRef.current = null;
+      setSelections(null);
+      setSelectionRunning(false);
       setLoading(false);
     }
+    setError('');
+    setTab(next);
   }
 
   async function lock() {
@@ -397,7 +415,7 @@ export default function App() {
   }
 
   async function loadStats() {
-    setTab('stats');
+    switchTab('stats');
     try {
       setStats(await Api.stats());
     } catch (e: any) {
@@ -425,11 +443,14 @@ export default function App() {
         loading={loading}
         error={error}
         onBack={() => {
+          raceAbortRef.current?.abort();
+          raceAbortRef.current = null;
           setSelected(null);
           setAnalysis(null);
+          setLoading(false);
           setError('');
         }}
-        onRefresh={() => openRace(selected, true)}
+        onRefresh={() => openRace(selected)}
         onLock={lock}
       />
     );
@@ -457,11 +478,10 @@ export default function App() {
           <SelectionsScreen
             dayOffset={dayOffset}
             selections={selections}
-            historyStatus={historyStatus}
-            loading={loading}
+            loading={selectionRunning}
             error={error}
             onDay={chooseDay}
-            onRefresh={refresh}
+            onRun={runSelections}
           />
         )}
         {tab === 'programme' && (
@@ -500,11 +520,11 @@ export default function App() {
 
       <BottomNav
         tab={tab}
-        onSelections={() => setTab('selections')}
-        onProgram={() => setTab('programme')}
-        onResults={() => setTab('results')}
+        onSelections={() => switchTab('selections')}
+        onProgram={() => switchTab('programme')}
+        onResults={() => switchTab('results')}
         onStats={loadStats}
-        onSettings={() => setTab('settings')}
+        onSettings={() => switchTab('settings')}
       />
     </SafeAreaView>
   );
@@ -513,36 +533,22 @@ export default function App() {
 function SelectionsScreen({
   dayOffset,
   selections,
-  historyStatus,
   loading,
   error,
   onDay,
-  onRefresh,
+  onRun,
 }: {
   dayOffset: 0 | 1;
   selections: any;
-  historyStatus: any;
   loading: boolean;
   error: string;
   onDay: (offset: 0 | 1) => void;
-  onRefresh: () => void;
+  onRun: () => void;
 }) {
   const dayReady = !!selections?.day && (
     !!selections.day.ready ||
     ['horse', 'placed', 'outsider', 'tocard', 'heart'].some(kind => !!selections.day[kind])
   );
-  const historyQuality = historyStatus ? {
-    total: historyStatus.total_horses,
-    ready: historyStatus.horses_with_detailed_history,
-    ready_percent: historyStatus.detailed_coverage_percent,
-    loading: Number(historyStatus.statuses?.pending || 0) + Number(historyStatus.statuses?.loading || 0),
-    insufficient: Number(historyStatus.statuses?.unavailable || 0) + Number(historyStatus.statuses?.history_incomplete || 0),
-    ranking_eligible: selections?.day?.data_quality?.ranking_eligible || 0,
-    historical_race_rows: historyStatus.historical_race_rows,
-    historical_race_rows_linked: historyStatus.historical_race_rows_linked,
-    historical_race_rows_pending: historyStatus.historical_race_rows_pending,
-    historical_race_link_percent: historyStatus.historical_race_link_percent,
-  } : null;
   return (
     <ScrollView showsVerticalScrollIndicator={false} contentContainerStyle={s.content}>
       <View style={s.selectionHero}>
@@ -553,20 +559,25 @@ function SelectionsScreen({
         </Text>
         <Text style={s.selectionHeroDate}>{longDate(dayOffset)}</Text>
         <Text style={s.selectionHeroText}>
-          Tous les chevaux de la journée comparés par notre méthode indépendante et approfondie.
+          Le calcul complet ne démarre que lorsque tu le demandes. HippoEdge traite alors les courses une par une avec la méthode complète.
         </Text>
         <DaySwitcher dayOffset={dayOffset} onDay={onDay} />
-        <GoldButton label="Actualiser analyses et résultats" icon="↻" onPress={onRefresh} />
+        <GoldButton
+          label={dayReady ? 'Relancer les sélections du jour' : 'Lancer les sélections du jour'}
+          icon="▶"
+          onPress={onRun}
+        />
       </View>
-      {!!(historyQuality || selections?.day?.data_quality) && (
-        <DataQualityCard quality={historyQuality || selections.day.data_quality} />
-      )}
-      {loading && <Loading text="Comparaison de tous les chevaux…" />}
-      {!!error && <ErrorCard title="Connexion interrompue" text={error} />}
+      {!!selections?.day?.data_quality && <DataQualityCard quality={selections.day.data_quality} />}
+      {loading && <Loading text="Analyse complète course par course…" />}
+      {!!error && <ErrorCard title="Analyse interrompue" text={error} />}
       {dayReady ? (
         <DayPicks picks={selections.day} />
       ) : (
-        !loading && <EmptyState title="Sélections en attente" text="Les historiques détaillés sont contrôlés automatiquement. Les choix apparaîtront uniquement quand le lot sera assez documenté." />
+        !loading && <EmptyState
+          title="Sélections non lancées"
+          text="Aucun calcul lourd ne tourne en arrière-plan. Appuie sur « Lancer les sélections du jour ». Si tu quittes cette page, le calcul est annulé et devra être relancé."
+        />
       )}
       {!!selections?.meetings?.length && (
         <>

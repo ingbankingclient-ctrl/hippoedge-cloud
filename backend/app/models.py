@@ -108,6 +108,18 @@ class HorseHistory(Base):
     runner: Mapped[Runner] = relationship(back_populates="history")
 
 
+class HistoricalRaceCache(Base):
+    __tablename__ = "historical_race_cache"
+
+    course_id: Mapped[str] = mapped_column(String(80), primary_key=True)
+    status: Mapped[str] = mapped_column(String(32), default="ok", index=True)
+    participants: Mapped[list[dict[str, Any]]] = mapped_column(JSON, default=list)
+    source: Mapped[str | None] = mapped_column(String(120), nullable=True)
+    warning: Mapped[str | None] = mapped_column(Text, nullable=True)
+    checked_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.now, index=True)
+
+
+
 class AnalysisSnapshot(Base):
     __tablename__ = "analysis_snapshots"
 
