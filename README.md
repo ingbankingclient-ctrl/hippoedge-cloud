@@ -2,7 +2,7 @@
 
 HippoEdge est un produit complet **mobile + API** conçu pour analyser automatiquement les réunions/courses PMU du jour et du lendemain en appliquant une méthode indépendante des cotes, favoris et pronostics externes.
 
-La version **v6.9.1 — Carrières complètes sans plafond local et courses recroisées** lit tout le tableau de carrière public que la source publie pour chaque cheval Geny identifié avec certitude, sans plafond local de 500 lignes, puis rouvre chaque ancienne course par son identifiant exact pour récupérer tous les partants et résultats. Les téléchargements sont dédupliqués, limités en débit, enregistrés course par course et repris automatiquement après une interruption de l’hébergeur. Une musique comme `1a2a3a` n'est jamais assimilée à trois courses détaillées et aucun choix public n’est produit lorsque les preuves minimales manquent.
+La version **v6.9.2 — Carrières complètes et recroisement accéléré** lit tout le tableau de carrière public que la source publie pour chaque cheval Geny identifié avec certitude, sans plafond local de 500 lignes, puis rouvre chaque ancienne course par son identifiant exact pour récupérer tous les partants et résultats. Les téléchargements sont dédupliqués, limités en débit, enregistrés course par course et repris automatiquement après une interruption de l’hébergeur. Une musique comme `1a2a3a` n'est jamais assimilée à trois courses détaillées et aucun choix public n’est produit lorsque les preuves minimales manquent.
 
 ## Ce qui est déjà livré
 
@@ -166,7 +166,12 @@ cd backend
 PYTHONPATH=. pytest -q
 ```
 
-État au moment de la livraison v6.9.1 : le programme et les arrivées sont importés rapidement, chaque tableau de carrière est enregistré immédiatement, puis les anciennes courses sont recroisées par lots avec reprise persistante. Le cache utilise l’identifiant exact de course et évite de redemander une course commune à plusieurs chevaux. Deux courses distinctes disputées le même jour, sur le même hippodrome et la même distance restent séparées par leur identifiant. Les snapshots post-départ sont exclus des sélections et une arrivée officielle ne peut plus réécrire le snapshot pré-course. La suite contient **68 tests backend**, dont la carrière JSON complète, le contrôle d’identité, l’exclusion des cotes/avis, le cache des courses communes, la reprise des checkpoints, le seuil documentaire, le format PMU, les chaînes A→B→C→D, le cycle provisoire/officiel et l’indépendance mathématique du réseau. La méthode de calcul est `2026.09.04-v6.9.1-complete`.
+
+### Accélération v6.9.2
+
+Le recroisement exact des anciennes courses reste complet mais n'est plus strictement séquentiel : les connexions HTTP sont réutilisées, plusieurs réponses peuvent être attendues en parallèle sous un sémaphore borné, le départ des requêtes reste cadencé, et un lot entier est persisté dans une seule transaction. Le moteur ne recharge plus les 633 carrières et ne régénère plus toutes les analyses après chaque lot de 120 courses ; cette finalisation lourde n'a lieu qu'à la fin du recroisement. Cela réduit fortement le temps total sans supprimer une seule course ni raccourcir les chaînes A→B→C→D.
+
+État au moment de la livraison v6.9.2 : le programme et les arrivées sont importés rapidement, chaque tableau de carrière est enregistré immédiatement, puis les anciennes courses sont recroisées par lots avec reprise persistante. Le cache utilise l’identifiant exact de course et évite de redemander une course commune à plusieurs chevaux. Deux courses distinctes disputées le même jour, sur le même hippodrome et la même distance restent séparées par leur identifiant. Les snapshots post-départ sont exclus des sélections et une arrivée officielle ne peut plus réécrire le snapshot pré-course. La suite contient **69 tests backend**, dont la carrière JSON complète, le contrôle d’identité, l’exclusion des cotes/avis, le cache des courses communes, la reprise des checkpoints, le seuil documentaire, le format PMU, les chaînes A→B→C→D, le cycle provisoire/officiel et l’indépendance mathématique du réseau. La méthode de calcul est `2026.09.04-v6.9.2-speed`.
 
 ## Limite honnête
 
