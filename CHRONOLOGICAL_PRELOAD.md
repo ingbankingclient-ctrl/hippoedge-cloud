@@ -27,3 +27,7 @@ Une course prête est recalculée si :
 ## Intégrité
 
 Le moteur de calcul reste `generate_analysis()` avec le contrat 18/18 blocs. Aucun raccourci de carrière, de réseau A→B→C→D, de potentiel caché, robustesse, volatilité, Finisseur, Late mover, Résistance aux finisseurs, Course ciblée ou engagements n’est introduit par cette orchestration.
+
+
+## Accès direct aux 4 prochaines courses (v6.9.13)
+L'onglet **À venir** mélange toutes les réunions de la journée par `scheduled_at` et affiche automatiquement les quatre prochains départs. Une analyse déjà prête s'ouvre immédiatement ; une course encore dans la file conserve son statut jusqu'à publication du snapshot. La liste se recalcule toutes les 15 secondes sans intervention de l'utilisateur.

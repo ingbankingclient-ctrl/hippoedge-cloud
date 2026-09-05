@@ -14,7 +14,7 @@ import {
 import {Api, getBaseUrl, setBaseUrl} from './src/api';
 import type {Analysis, Meeting, Race, Score} from './src/types';
 
-type Tab = 'selections' | 'programme' | 'results' | 'stats' | 'settings';
+type Tab = 'selections' | 'upcoming' | 'programme' | 'results' | 'stats' | 'settings';
 
 const C = {
   bg: '#07090E',
@@ -590,6 +590,17 @@ export default function App() {
             onRun={runSelections}
           />
         )}
+        {tab === 'upcoming' && (
+          <UpcomingRacesScreen
+            dayOffset={dayOffset}
+            meetings={meetings}
+            dashboard={dashboard}
+            loading={loading}
+            error={error}
+            onDay={chooseDay}
+            onRace={openRace}
+          />
+        )}
         {tab === 'programme' && (
           <Program
             dayOffset={dayOffset}
@@ -628,6 +639,7 @@ export default function App() {
       <BottomNav
         tab={tab}
         onSelections={() => switchTab('selections')}
+        onUpcoming={() => switchTab('upcoming')}
         onProgram={() => switchTab('programme')}
         onResults={() => switchTab('results')}
         onStats={loadStats}
@@ -708,6 +720,127 @@ function SelectionsScreen({
             <SelectionMeetingCard key={meeting.meeting_code} meeting={meeting} />
           ))}
         </>
+      )}
+    </ScrollView>
+  );
+}
+
+function UpcomingRacesScreen({
+  dayOffset,
+  meetings,
+  dashboard,
+  loading,
+  error,
+  onDay,
+  onRace,
+}: {
+  dayOffset: 0 | 1;
+  meetings: Meeting[];
+  dashboard: any;
+  loading: boolean;
+  error: string;
+  onDay: (offset: 0 | 1) => void;
+  onRace: (race: Race) => void;
+}) {
+  const [clock, setClock] = useState(Date.now());
+
+  useEffect(() => {
+    const timer = setInterval(() => setClock(Date.now()), 15000);
+    return () => clearInterval(timer);
+  }, []);
+
+  const upcoming = (Array.isArray(meetings) ? meetings : [])
+    .flatMap(meeting => meeting.races.map(race => ({meeting, race})))
+    .filter(item => new Date(item.race.scheduled_at).getTime() > clock)
+    .sort((a, b) => {
+      const byTime = new Date(a.race.scheduled_at).getTime() - new Date(b.race.scheduled_at).getTime();
+      return byTime || a.race.id - b.race.id;
+    })
+    .slice(0, 4);
+
+  const readyIds = new Set<number>(((dashboard?.ready_race_ids || []) as number[]));
+  const queueByRace = new Map<number, any>(
+    ((dashboard?.race_queue || []) as any[]).map(item => [Number(item.race_id), item]),
+  );
+
+  function startLabel(iso: string) {
+    const diffMinutes = Math.max(0, Math.round((new Date(iso).getTime() - clock) / 60000));
+    if (diffMinutes <= 1) return 'Départ imminent';
+    if (diffMinutes < 60) return `Dans ${diffMinutes} min`;
+    const hours = Math.floor(diffMinutes / 60);
+    const minutes = diffMinutes % 60;
+    if (hours < 24) return `Dans ${hours} h${minutes ? ` ${minutes} min` : ''}`;
+    return dayOffset === 1 ? `Demain à ${fmt(iso)}` : new Date(iso).toLocaleDateString('fr-FR', {day: '2-digit', month: '2-digit'});
+  }
+
+  return (
+    <ScrollView showsVerticalScrollIndicator={false} contentContainerStyle={s.content}>
+      <View style={s.programHero}>
+        <Eyebrow>ACCÈS DIRECT</Eyebrow>
+        <Text style={s.programTitle}>Les 4 prochaines courses</Text>
+        <Text style={s.programDate}>{longDate(dayOffset)}</Text>
+        <Text style={s.selectionHeroText}>
+          Toutes les réunions sont mélangées par heure réelle de départ. Tu n’as rien à chercher : les quatre prochaines courses se mettent à jour automatiquement.
+        </Text>
+        <DaySwitcher dayOffset={dayOffset} onDay={onDay} />
+      </View>
+
+      {loading && <Loading text="Mise à jour des prochaines courses…" />}
+      {!!error && <ErrorCard title="Connexion interrompue" text={error} />}
+
+      {!!upcoming.length && (
+        <View style={{gap: 12}}>
+          {upcoming.map(({meeting, race}, index) => {
+            const ready = readyIds.has(race.id);
+            const queueStatus = queueByRace.get(race.id)?.status;
+            return (
+              <View key={race.id} style={s.courseCard}>
+                <View style={s.courseCardTop}>
+                  <View style={s.courseCodeLarge}>
+                    <Text style={s.courseCodeLargeText}>{index + 1}</Text>
+                  </View>
+                  <View style={{flex: 1}}>
+                    <Text style={s.courseTime}>{fmt(race.scheduled_at)} · {startLabel(race.scheduled_at)}</Text>
+                    <Text style={s.courseName}>{meeting.code} · {race.code} · {meeting.track}</Text>
+                    <Text style={s.muted}>{race.name}</Text>
+                  </View>
+                  <Text style={[s.official, ready ? {color: C.green} : {color: C.goldBright}]}> 
+                    {ready ? '● PRÊTE' : queueStatus === 'missed' ? '× PASSÉE' : '○ EN COURS'}
+                  </Text>
+                </View>
+                <View style={s.courseFacts}>
+                  <Chip text={plainLabel(race.discipline)} />
+                  <Chip text={`${race.distance_m || '?'} m`} />
+                  <Chip text={`${race.runners.filter(runner => !runner.scratched).length} partants`} />
+                  {!!race.surface && <Chip text={plainLabel(race.surface)} />}
+                </View>
+                <GoldButton
+                  label={ready ? "Ouvrir l’analyse maintenant" : queueStatus === 'missed' ? "Pas de snapshot pré-course" : "Analyse en préparation…"}
+                  icon={ready ? '→' : queueStatus === 'missed' ? '×' : '…'}
+                  onPress={() => {
+                    if (ready) {
+                      onRace(race);
+                    } else if (queueStatus === 'missed') {
+                      Alert.alert('Pas de snapshot pré-course', 'Cette course a déjà démarré sans analyse pré-course disponible.');
+                    } else {
+                      Alert.alert(
+                        'Analyse en préparation',
+                        'HippoEdge travaille les courses par heure de départ. Dès que cette course est terminée, le bouton devient disponible automatiquement.',
+                      );
+                    }
+                  }}
+                />
+              </View>
+            );
+          })}
+        </View>
+      )}
+
+      {!loading && !upcoming.length && (
+        <EmptyState
+          title={dayOffset === 0 ? 'Plus de course à venir aujourd’hui' : 'Programme de demain indisponible'}
+          text={dayOffset === 0 ? 'Les courses du jour sont terminées. Tu peux passer sur Demain.' : 'Les prochaines courses apparaîtront ici dès que le programme sera chargé.'}
+        />
       )}
     </ScrollView>
   );
@@ -1275,6 +1408,7 @@ function Settings({
 function BottomNav({
   tab,
   onSelections,
+  onUpcoming,
   onProgram,
   onResults,
   onStats,
@@ -1282,6 +1416,7 @@ function BottomNav({
 }: {
   tab: Tab;
   onSelections: () => void;
+  onUpcoming: () => void;
   onProgram: () => void;
   onResults: () => void;
   onStats: () => void;
@@ -1291,6 +1426,7 @@ function BottomNav({
     <View style={s.navWrap}>
       <View style={s.nav}>
         <NavItem active={tab === 'selections'} icon="◆" label="Sélections" onPress={onSelections} />
+        <NavItem active={tab === 'upcoming'} icon="◷" label="À venir" onPress={onUpcoming} />
         <NavItem active={tab === 'programme'} icon="⌁" label="Courses" onPress={onProgram} />
         <NavItem active={tab === 'results'} icon="✓" label="Arrivées" onPress={onResults} />
         <NavItem active={tab === 'stats'} icon="▥" label="Bilan" onPress={onStats} />
@@ -2440,7 +2576,7 @@ const s = StyleSheet.create({
   navIconBoxActive: {backgroundColor: '#242015'},
   navIcon: {color: C.mutedDark, fontSize: 17, fontWeight: '900'},
   navIconActive: {color: C.goldBright},
-  navLabel: {color: C.mutedDark, fontSize: 8.2, fontWeight: '800'},
+  navLabel: {color: C.mutedDark, fontSize: 7.6, fontWeight: '800'},
   navLabelActive: {color: C.ivory},
   raceHeader: {minHeight: 64, paddingHorizontal: 16, paddingVertical: 10, flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', borderBottomWidth: 1, borderBottomColor: C.lineSoft},
   backButton: {flexDirection: 'row', alignItems: 'center', gap: 5, paddingVertical: 5},

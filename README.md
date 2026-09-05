@@ -228,3 +228,7 @@ Ajout de la résistance aux finisseurs et des contre-preuves directes entre chev
 Cette version verrouille la présentation complète de chaque course : 18 blocs permanents contrôlés, arguments avant les notes, Top 3 Potentiel caché/Robustesse/Faible volatilité rendus explicitement, Finisseur/Late mover/Résistance séparés, Paramètres renforcés, et bloc Course ciblée / engagements calculé à partir de faits objectifs puis affiché après la Conclusion nette.
 
 Le Bilan distingue les courses historiques uniques des lignes de performances et protège l'affichage contre les réponses HTTP anciennes qui pouvaient donner l'impression que l'avancement reculait.
+
+
+## Accès direct aux 4 prochaines courses (v6.9.13)
+L'onglet **À venir** mélange toutes les réunions de la journée par `scheduled_at` et affiche automatiquement les quatre prochains départs. Une analyse déjà prête s'ouvre immédiatement ; une course encore dans la file conserve son statut jusqu'à publication du snapshot. La liste se recalcule toutes les 15 secondes sans intervention de l'utilisateur.
