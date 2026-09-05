@@ -651,6 +651,26 @@ class GenyApiParser:
                 "condition_course": cls._label(course.get("conditionDeLaCourse")),
                 "etat_course": cls._label(course.get("etatCourse")),
                 "dimension": cls._label(course.get("dimension")),
+                # Objective late-race facts for the independent Finisseur block.
+                # Editorial end-of-race notes remain deliberately excluded.
+                "positions_intermediaires": (
+                    performance.get("positionsIntermediaires")
+                    or performance.get("positionsIntermediairesCourse")
+                    or performance.get("passages")
+                    or performance.get("classementsIntermediaires")
+                ),
+                "places_gagnees_fin": (
+                    performance.get("placesGagneesFinCourse")
+                    or performance.get("placesGagneesDerniers400m")
+                    or performance.get("placesGagneesDerniers500m")
+                    or performance.get("placesGagneesDerniers600m")
+                ),
+                "rang_dernier_troncon": (
+                    performance.get("rangDernierTroncon")
+                    or performance.get("rangDerniers400m")
+                    or performance.get("rangDerniers500m")
+                    or performance.get("rangDerniers600m")
+                ),
                 "geny_course_id": str(course.get("id")) if course.get("id") is not None else None,
                 "geny_performance_id": str(performance.get("id")) if performance.get("id") is not None else None,
                 "geny_horse_id": performance_id,

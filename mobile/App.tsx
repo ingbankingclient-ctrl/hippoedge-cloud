@@ -259,7 +259,10 @@ function AnalysisGuide() {
         <Text style={s.guideStrong}>Caché</Text> : valeur qui peut être meilleure que la forme récente.{' '}
         <Text style={s.guideStrong}>Robuste</Text> : résistance aux aléas de course.{' '}
         <Text style={s.guideStrong}>Volatilité</Text> : risque d’une prévision moins sûre ; plus elle est haute, plus il faut rester prudent.{' '}
-        <Text style={s.guideStrong}>Réseau</Text> : classement séparé construit avec les adversaires réellement croisés et leurs résultats suivants ; il ne change aucune autre note.
+        <Text style={s.guideStrong}>Réseau</Text> : classement séparé construit avec les adversaires réellement croisés et leurs résultats suivants ; il ne change aucune autre note.{' '}
+        <Text style={s.guideStrong}>Finisseur</Text> : capacité répétée à gagner des places ou produire un meilleur dernier tronçon dans la phase finale, uniquement à partir de déroulements/sectionnels factuels.{' '}
+        <Text style={s.guideStrong}>Résistance aux finisseurs</Text> : preuve qu’un cheval a déjà conservé l’avantage sur un finisseur du lot précisément pendant une course où le finish de ce rival était objectivement mesuré.{' '}
+        <Text style={s.guideStrong}>Progressif tardif</Text> : cheval qui remonte avant la toute dernière phase puis soutient cet effort jusqu’au poteau. Les notes /100 restent visibles, mais les arguments factuels sont prioritaires.
       </Text>
     </View>
   );
@@ -293,6 +296,41 @@ export default function App() {
   const [selectionRunning, setSelectionRunning] = useState(false);
   const raceAbortRef = useRef<AbortController | null>(null);
   const selectionAbortRef = useRef<AbortController | null>(null);
+  const dashboardByDayRef = useRef<Record<string, any>>({});
+
+  function applyDashboard(day: string, next: any) {
+    if (!next) return;
+    const previous = dashboardByDayRef.current[day];
+    const previousActivity = previous?.activity || {};
+    const nextActivity = next?.activity || {};
+    const merged = previous ? {
+      ...next,
+      ready_race_ids: Array.from(new Set([
+        ...((previous?.ready_race_ids || []) as number[]),
+        ...((next?.ready_race_ids || []) as number[]),
+      ])),
+      activity: {
+        ...nextActivity,
+        // These values describe persistent historical facts and therefore must
+        // never visually go backwards because an older HTTP response arrives
+        // after a newer one. Totals may only grow as new profiles are found.
+        historical_unique_courses_linked: Math.max(
+          Number(previousActivity.historical_unique_courses_linked || 0),
+          Number(nextActivity.historical_unique_courses_linked || 0),
+        ),
+        historical_unique_courses_total: Math.max(
+          Number(previousActivity.historical_unique_courses_total || 0),
+          Number(nextActivity.historical_unique_courses_total || 0),
+        ),
+        cached_historical_races_global: Math.max(
+          Number(previousActivity.cached_historical_races_global || 0),
+          Number(nextActivity.cached_historical_races_global || 0),
+        ),
+      },
+    } : next;
+    dashboardByDayRef.current[day] = merged;
+    setDashboard(merged);
+  }
 
   useEffect(() => {
     getBaseUrl().then(setUrl);
@@ -308,8 +346,8 @@ export default function App() {
       const day = localISO(dayOffset);
       try {
         const dash = await Api.dashboard(day);
-        setDashboard(dash);
-        if (dash?.ready) {
+        applyDashboard(day, dash);
+        if (Number(dash?.activity?.courses_analyzed || 0) > 0) {
           const picks = await Api.selections(day).catch(() => null);
           if (picks) setSelections(picks);
         }
@@ -317,6 +355,46 @@ export default function App() {
         // Keep the last known UI state; the normal refresh/error path remains explicit.
       }
     }, 30000);
+    return () => clearInterval(timer);
+  }, [dayOffset]);
+
+  useEffect(() => {
+    let lastReadyCount = -1;
+    const timer = setInterval(async () => {
+      const day = localISO(dayOffset);
+      try {
+        const queue = await Api.queue(day);
+        const previous = dashboardByDayRef.current[day];
+        if (previous) {
+          const updated = {
+            ...previous,
+            ready: queue.ready,
+            status: queue.ready ? 'ready' : 'updating',
+            ready_race_ids: queue.ready_race_ids || [],
+            pending_race_ids: queue.pending_race_ids || [],
+            next_pending_race: queue.next_pending_race || null,
+            race_queue: queue.race_queue || [],
+            activity: {
+              ...(previous.activity || {}),
+              courses_total: queue.courses_total || 0,
+              courses_analyzed: queue.courses_analyzed || 0,
+              courses_updating: queue.courses_updating || 0,
+              courses_missed_without_prerace: queue.courses_missed_without_prerace || 0,
+            },
+          };
+          dashboardByDayRef.current[day] = updated;
+          setDashboard(updated);
+        }
+        const count = Number(queue?.courses_analyzed || 0);
+        if (count > 0 && count !== lastReadyCount) {
+          lastReadyCount = count;
+          const picks = await Api.selections(day).catch(() => null);
+          if (picks) setSelections(picks);
+        }
+      } catch {
+        // Lightweight queue polling is best-effort; the 30 s dashboard refresh remains authoritative.
+      }
+    }, 5000);
     return () => clearInterval(timer);
   }, [dayOffset]);
 
@@ -331,7 +409,7 @@ export default function App() {
         Api.selections(day).catch(() => null),
       ]);
       setMeetings(normalizeMeetings(program));
-      setDashboard(dash);
+      applyDashboard(day, dash);
       setSelections(picks);
     } catch (e: any) {
       setMeetings([]);
@@ -364,7 +442,7 @@ export default function App() {
         Api.selections(day).catch(() => null),
       ]);
       setMeetings(normalizeMeetings(program));
-      setDashboard(dash);
+      applyDashboard(day, dash);
       setSelections(picks);
     } catch (e: any) {
       setError(`Actualisation : ${e?.message || String(e)}`);
@@ -408,7 +486,7 @@ export default function App() {
         Api.dashboard(day).catch(() => null),
       ]);
       setSelections(picks);
-      setDashboard(dash);
+      applyDashboard(day, dash);
     } catch (e: any) {
       setError(e?.message || String(e));
     } finally {
@@ -444,7 +522,7 @@ export default function App() {
         Api.dashboard(localISO(dayOffset)),
       ]);
       setStats(performanceStats);
-      setDashboard(dash);
+      applyDashboard(localISO(dayOffset), dash);
     } catch (e: any) {
       setError(e.message);
     }
@@ -576,10 +654,11 @@ function SelectionsScreen({
   onDay: (offset: 0 | 1) => void;
   onRun: () => void;
 }) {
-  const dayReady = !!dashboard?.ready && !!selections?.day && (
+  const hasPicks = !!selections?.day && (
     !!selections.day.ready ||
     ['horse', 'placed', 'outsider', 'tocard', 'heart'].some(kind => !!selections.day[kind])
   );
+  const dayComplete = !!dashboard?.ready;
   return (
     <ScrollView showsVerticalScrollIndicator={false} contentContainerStyle={s.content}>
       <View style={s.selectionHero}>
@@ -590,11 +669,11 @@ function SelectionsScreen({
         </Text>
         <Text style={s.selectionHeroDate}>{longDate(dayOffset)}</Text>
         <Text style={s.selectionHeroText}>
-          HippoEdge prépare automatiquement les carrières, le réseau A→B→C→D et les analyses avant ton arrivée. Cette page lit uniquement les sélections déjà calculées.
+          HippoEdge analyse les courses une par une dans l’ordre chronologique. Les sélections apparaissent dès les premières courses prêtes et évoluent jusqu’à la fin de la journée.
         </Text>
         <DaySwitcher dayOffset={dayOffset} onDay={onDay} />
         <GoldButton
-          label={dayReady ? 'Actualiser les sélections' : 'Vérifier si la journée est prête'}
+          label={hasPicks ? 'Actualiser les sélections disponibles' : 'Vérifier les premières courses prêtes'}
           icon="▶"
           onPress={onRun}
         />
@@ -602,12 +681,20 @@ function SelectionsScreen({
       {!!selections?.day?.data_quality && <DataQualityCard quality={selections.day.data_quality} />}
       {loading && <Loading text="Lecture des sélections pré-calculées…" />}
       {!!error && <ErrorCard title="Analyse interrompue" text={error} />}
-      {dayReady ? (
-        <DayPicks picks={selections.day} />
+      {hasPicks ? (
+        <>
+          {!dayComplete && (
+            <View style={[s.preloadBanner, s.preloadUpdating]}>
+              <Text style={[s.preloadTitle, {color: C.goldBright}]}>SÉLECTIONS PROVISOIRES</Text>
+              <Text style={s.preloadText}>Elles utilisent uniquement les courses déjà analysées. Elles se mettent à jour automatiquement à mesure que la file chronologique avance.</Text>
+            </View>
+          )}
+          <DayPicks picks={selections.day} />
+        </>
       ) : (
         !loading && <EmptyState
-          title="Préparation automatique en cours"
-          text="Le backend prépare les courses en arrière-plan. Dès qu’une analyse est prête, elle reste disponible instantanément sans recalcul au clic."
+          title="Première course en préparation"
+          text="HippoEdge traite d’abord la première course chronologique du jour. Sa sélection apparaîtra dès que son analyse complète sera enregistrée."
         />
       )}
       {!!selections?.meetings?.length && (
@@ -691,11 +778,16 @@ function Program({
         {!!dashboard && (
           <View style={[s.preloadBanner, dashboard.ready ? s.preloadReady : s.preloadUpdating]}>
             <Text style={[s.preloadTitle, dashboard.ready ? {color: C.green} : {color: C.goldBright}]}>
-              {dashboard.ready ? '✓ JOURNÉE PRÊTE' : '… PRÉPARATION AUTOMATIQUE'}
+              {dashboard.ready ? '✓ TOUTES LES COURSES DISPONIBLES' : '… ANALYSE COURSE PAR COURSE'}
             </Text>
             <Text style={s.preloadText}>
-              {dashboard.activity?.courses_analyzed || 0}/{dashboard.activity?.courses_total || 0} courses · {dashboard.activity?.horses_analyzed || 0}/{dashboard.activity?.horses_total || 0} chevaux analysés
+              {dashboard.activity?.courses_analyzed || 0}/{dashboard.activity?.courses_total || 0} courses déjà disponibles · {dashboard.activity?.horses_analyzed || 0}/{dashboard.activity?.horses_total || 0} chevaux analysés
             </Text>
+            {!!dashboard?.next_pending_race && (
+              <Text style={s.preloadText}>
+                Prochaine dans la file : {dashboard.next_pending_race.meeting_code} · {dashboard.next_pending_race.race_code} · {fmt(dashboard.next_pending_race.scheduled_at)}
+              </Text>
+            )}
           </View>
         )}
       </View>
@@ -754,14 +846,22 @@ function Program({
           {!!activeRace && (
             <CourseMenuCard
               race={activeRace}
-              ready={!!dashboard?.ready}
+              ready={((dashboard?.ready_race_ids || []) as number[]).includes(activeRace.id)}
+              queueStatus={(dashboard?.race_queue || []).find((item: any) => item.race_id === activeRace.id)?.status}
               onOpen={() => {
-                if (dashboard?.ready) {
+                const ready = ((dashboard?.ready_race_ids || []) as number[]).includes(activeRace.id);
+                const queueStatus = (dashboard?.race_queue || []).find((item: any) => item.race_id === activeRace.id)?.status;
+                if (ready) {
                   onRace(activeRace);
+                } else if (queueStatus === 'missed') {
+                  Alert.alert(
+                    'Pas de snapshot pré-course',
+                    'Cette course avait déjà démarré avant que cette version puisse publier son analyse. HippoEdge ne fabrique jamais un pronostic rétroactivement.',
+                  );
                 } else {
                   Alert.alert(
-                    'Préparation automatique',
-                    'HippoEdge termine les profils, les anciennes courses et le réseau historique. L’analyse sera accessible dès que la journée sera prête.',
+                    'Cette course est dans la file',
+                    'HippoEdge traite les courses du jour une par une dans l’ordre chronologique. Dès que celle-ci est terminée, son analyse devient immédiatement accessible sans attendre les autres courses.',
                   );
                 }
               }}
@@ -851,7 +951,7 @@ function SelectionMeetingCard({meeting}: {meeting: any}) {
   );
 }
 
-function CourseMenuCard({race, ready, onOpen}: {race: Race; ready: boolean; onOpen: () => void}) {
+function CourseMenuCard({race, ready, queueStatus, onOpen}: {race: Race; ready: boolean; queueStatus?: string; onOpen: () => void}) {
   return (
     <View style={s.courseCard}>
       <View style={s.courseCardTop}>
@@ -870,7 +970,11 @@ function CourseMenuCard({race, ready, onOpen}: {race: Race; ready: boolean; onOp
         {!!race.purse_eur && <Chip text={`${Math.round(race.purse_eur).toLocaleString('fr-FR')} €`} />}
       </View>
       {!!race.result && <Arrival result={race.result} />}
-      <GoldButton label={ready ? "Ouvrir l’analyse instantanée" : "Préparation en cours…"} icon={ready ? "→" : "…"} onPress={onOpen} />
+      <GoldButton
+        label={ready ? "Ouvrir l’analyse instantanée" : queueStatus === 'missed' ? "Pas d’analyse pré-course" : "Dans la file chronologique…"}
+        icon={ready ? "→" : queueStatus === 'missed' ? "×" : "…"}
+        onPress={onOpen}
+      />
     </View>
   );
 }
@@ -1014,10 +1118,10 @@ function Stats({stats, dashboard, error}: {stats: any; dashboard: any; error: st
         <>
           <View style={[s.preloadBanner, dashboard.ready ? s.preloadReady : s.preloadUpdating]}>
             <Text style={[s.preloadTitle, dashboard.ready ? {color: C.green} : {color: C.goldBright}]}>
-              {dashboard.ready ? '✓ JOURNÉE PRÊTE' : '… MISE À JOUR EN COURS'}
+              {dashboard.ready ? '✓ FILE DU JOUR TERMINÉE' : '… ANALYSE CHRONOLOGIQUE EN COURS'}
             </Text>
             <Text style={s.preloadText}>
-              {activity.courses_analyzed || 0}/{activity.courses_total || 0} courses prêtes · {activity.horses_analyzed || 0}/{activity.horses_total || 0} chevaux analysés
+              {activity.courses_analyzed || 0}/{activity.courses_total || 0} courses disponibles · {activity.horses_analyzed || 0}/{activity.horses_total || 0} chevaux analysés
             </Text>
           </View>
 
@@ -1029,16 +1133,18 @@ function Stats({stats, dashboard, error}: {stats: any; dashboard: any; error: st
           <View style={s.statsGrid}>
             <Stat label="Courses analysées" value={`${activity.courses_analyzed || 0}/${activity.courses_total || 0}`} featured />
             <Stat label="Chevaux analysés" value={`${activity.horses_analyzed || 0}/${activity.horses_total || 0}`} />
-            <Stat label="Courses en mise à jour" value={activity.courses_updating || 0} />
-            <Stat label="Réseau historique recroisé" value={`${activity.historical_rows_linked || 0}/${activity.historical_rows_total || 0}`} />
+            <Stat label="Courses encore dans la file" value={activity.courses_updating || 0} />
+            <Stat label="Courses parties sans snapshot pré-course" value={activity.courses_missed_without_prerace || 0} />
+            <Stat label="Courses historiques uniques recroisées" value={`${activity.historical_unique_courses_linked || 0}/${activity.historical_unique_courses_total || 0}`} />
+            <Stat label="Lignes de performances reliées" value={`${activity.historical_rows_linked || 0}/${activity.historical_rows_total || 0}`} />
             <Stat label="Profils vérifiés" value={`${activity.profiles_checked || 0}/${activity.profiles_total || 0}`} />
             <Stat label="Anciennes courses en cache global" value={activity.cached_historical_races_global || 0} />
           </View>
 
           <Section
             eyebrow="ENGAGEMENTS FUTURS"
-            title="Chevaux du jour déjà revus au programme"
-            text={`${dashboard.engagements?.count || 0} cheval${Number(dashboard.engagements?.count || 0) > 1 ? 'aux' : ''} du jour possède${Number(dashboard.engagements?.count || 0) > 1 ? 'nt' : ''} déjà un engagement futur connu${dashboard.engagements?.programs_known_through ? ` · programmes chargés jusqu’au ${dashboard.engagements.programs_known_through}` : ''}.`}
+            title="Chevaux de la journée déjà revus au programme"
+            text={`${dashboard.engagements?.count || 0} cheval${Number(dashboard.engagements?.count || 0) > 1 ? 'aux' : ''} de la journée possède${Number(dashboard.engagements?.count || 0) > 1 ? 'nt' : ''} déjà un engagement futur connu${dashboard.engagements?.programs_known_through ? ` · programmes chargés jusqu’au ${dashboard.engagements.programs_known_through}` : ''}.`}
           />
           <View style={s.filterRow}>
             {[3, 7, 14, 30].map(days => (
@@ -1054,7 +1160,7 @@ function Stats({stats, dashboard, error}: {stats: any; dashboard: any; error: st
           {!engagements.length && (
             <EmptyState
               title="Aucun engagement futur connu"
-              text={`Aucun cheval du jour n’est actuellement retrouvé dans un programme futur à ≤ ${windowDays} jours.`}
+              text={`Aucun cheval de la journée sélectionnée n’est actuellement retrouvé dans un programme futur à ≤ ${windowDays} jours.`}
             />
           )}
           {engagements.map((item: any, index: number) => (
@@ -1063,7 +1169,7 @@ function Stats({stats, dashboard, error}: {stats: any; dashboard: any; error: st
                 <View style={{flex: 1}}>
                   <Text style={s.engagementHorse}>{item.horse_name}</Text>
                   <Text style={s.engagementToday}>
-                    Aujourd’hui · {item.today?.meeting_code} {item.today?.race_code} · {item.today?.track}
+                    Course sélectionnée · {item.today?.meeting_code} {item.today?.race_code} · {item.today?.track}
                   </Text>
                 </View>
                 <View style={s.delayBadge}><Text style={s.delayText}>J+{item.next?.days_after || 0}</Text></View>
@@ -1267,6 +1373,46 @@ function RaceView({
         || Number(opponentNetwork(b)?.score || 0) - Number(opponentNetwork(a)?.score || 0)),
     [analysis],
   );
+  const finisherTop3 = Array.isArray(analysis?.summary?.finisher_top3_detail)
+    ? (analysis?.summary?.finisher_top3_detail as Array<Record<string, any>>)
+    : [];
+  const lateMoverTop3 = Array.isArray(analysis?.summary?.late_mover_top3_detail)
+    ? (analysis?.summary?.late_mover_top3_detail as Array<Record<string, any>>)
+    : [];
+  const finisherResistanceTop3 = Array.isArray(analysis?.summary?.finisher_resistance_top3_detail)
+    ? (analysis?.summary?.finisher_resistance_top3_detail as Array<Record<string, any>>)
+    : [];
+  const performanceDetail = Array.isArray(analysis?.summary?.top3_performance_detail)
+    ? (analysis?.summary?.top3_performance_detail as Array<Record<string, any>>)
+    : [];
+  const placedDetail = Array.isArray(analysis?.summary?.top3_placed_detail)
+    ? (analysis?.summary?.top3_placed_detail as Array<Record<string, any>>)
+    : [];
+  const hiddenDetail = Array.isArray(analysis?.summary?.hidden_potential_detail)
+    ? (analysis?.summary?.hidden_potential_detail as Array<Record<string, any>>)
+    : [];
+  const robustnessDetail = Array.isArray(analysis?.summary?.robustness_top3_detail)
+    ? (analysis?.summary?.robustness_top3_detail as Array<Record<string, any>>)
+    : [];
+  const volatilityDetail = Array.isArray(analysis?.summary?.low_volatility_top3_detail)
+    ? (analysis?.summary?.low_volatility_top3_detail as Array<Record<string, any>>)
+    : [];
+  const convergenceDetail = Array.isArray(analysis?.summary?.best_convergence_detail)
+    ? (analysis?.summary?.best_convergence_detail as Array<Record<string, any>>)
+    : [];
+  const overlookDetail = Array.isArray(analysis?.summary?.do_not_overlook_detail)
+    ? (analysis?.summary?.do_not_overlook_detail as Array<Record<string, any>>)
+    : [];
+  const selectionDetail = Array.isArray(analysis?.summary?.selection_8_detail)
+    ? (analysis?.summary?.selection_8_detail as Array<Record<string, any>>)
+    : [];
+  const houseTargetDetail = Array.isArray(analysis?.summary?.house_target?.detail)
+    ? (analysis?.summary?.house_target?.detail as Array<Record<string, any>>)
+    : [];
+  const performanceArgument = (number: number) =>
+    String(performanceDetail.find(item => Number(item.number) === number)?.argument || '');
+  const placedArgument = (number: number) =>
+    String(placedDetail.find(item => Number(item.number) === number)?.argument || '');
   return (
     <SafeAreaView style={s.safe}>
       <StatusBar barStyle="light-content" backgroundColor={C.bg} />
@@ -1314,6 +1460,21 @@ function RaceView({
         )}
         {!!analysis?.summary?.data_quality && <AnalysisQuality quality={analysis.summary.data_quality} />}
         {!!analysis && <AnalysisGuide />}
+        {!!analysis && (
+          analysis.summary?.method_complete ? (
+            <View style={s.confirm}>
+              <Text style={s.confirmIcon}>✓</Text>
+              <View style={{flex: 1}}>
+                <Text style={s.confirmTitle}>Méthode complète contrôlée</Text>
+                <Text style={s.confirmText}>
+                  {(analysis.summary?.completed_blocks || []).length}/{(analysis.summary?.required_blocks || []).length} blocs permanents présents. Un bloc sans preuve reste affiché comme insuffisant au lieu d’être oublié.
+                </Text>
+              </View>
+            </View>
+          ) : (
+            <ErrorCard title="Analyse incomplète" text={`Blocs manquants : ${(analysis.summary?.missing_blocks || []).join(', ') || 'non renseignés'}`} />
+          )
+        )}
         {analysis?.summary?.snapshot_phase === 'post_start' && (
           <ErrorCard
             title="Lecture tardive"
@@ -1365,43 +1526,220 @@ function RaceView({
             )}
             <Explanation text={analysis.summary.block_explanations?.opponent_network} color={C.blue} />
             <Section
+              eyebrow="FIN DE COURSE — BLOC INDÉPENDANT"
+              title="Top 3 — Finisseurs"
+              text="Détection d’un vrai profil de finisseur à partir des positions intermédiaires, places gagnées dans la phase finale et sectionnels factuels. Le n°1 doit aussi être une belle chance dans cette course."
+            />
+            {finisherTop3.length ? finisherTop3.map((item, index) => (
+              <FinisherCard key={`finisher-${item.number}`} rank={index + 1} item={item} />
+            )) : (
+              <EmptyState
+                title="Aucun finisseur publiable"
+                text="HippoEdge ne force aucun cheval : il faut un déroulement final objectif exploitable et le premier doit aussi être une belle chance actuelle."
+              />
+            )}
+            <Explanation text={analysis.summary.block_explanations?.finisher} color={C.coral} />
+            <Section
+              eyebrow="REMONTÉE AVANT LE SPRINT FINAL — BLOC INDÉPENDANT"
+              title="Top 3 — Progressifs tardifs"
+              text="Détection des chevaux qui gagnent plusieurs places avant la toute dernière phase puis soutiennent leur effort jusqu’au poteau. Ce profil est séparé du finisseur pur."
+            />
+            {lateMoverTop3.length ? lateMoverTop3.map((item, index) => (
+              <LateMoverCard key={`late-mover-${item.number}`} rank={index + 1} item={item} />
+            )) : (
+              <EmptyState
+                title="Aucun progressif tardif publiable"
+                text="Il faut une remontée objectivement mesurée puis un effort soutenu ; le premier doit aussi être une belle chance dans la course actuelle."
+              />
+            )}
+            <Explanation text={analysis.summary.block_explanations?.late_mover} color={C.blue} />
+            <Section
+              eyebrow="CONFRONTATION DES STYLES — BLOC INDÉPENDANT"
+              title="Top 3 — Résistance aux finisseurs"
+              text="Un cheval n’est classé ici que s’il a déjà fini devant un finisseur présent aujourd’hui lors d’une course où ce rival produisait réellement son finish. Une simple confrontation brute ne suffit pas."
+            />
+            {finisherResistanceTop3.length ? finisherResistanceTop3.map((item, index) => (
+              <FinisherResistanceCard key={`finisher-resistance-${item.number}`} rank={index + 1} item={item} />
+            )) : (
+              <EmptyState
+                title="Aucune résistance démontrée"
+                text="Aucun cheval du lot n’a encore une preuve directe assez propre face à un finisseur objectivement identifié."
+              />
+            )}
+            <Explanation text={analysis.summary.block_explanations?.finisher_resistance} color={C.green} />
+            <Section
               eyebrow="HIÉRARCHIE PRINCIPALE"
               title="Top 3 — Modèle complet"
-              text="La lecture globale orientée performance et possibilité de victoire."
+              text="Les arguments factuels passent avant les notes : résultats passés, contexte, lignes et risques expliquent chaque choix."
             />
             {performance.length ? performance.slice(0, 3).map((score, index) => (
-              <RunnerCard key={`top-${score.number}`} rank={index + 1} score={score} />
+              <RunnerCard key={`top-${score.number}`} rank={index + 1} score={score} argument={performanceArgument(score.number)} />
             )) : <EmptyState title="Classement en attente" text="Aucun cheval n’a encore assez de performances fiables pour établir ce Top 3." />}
             <Explanation text={analysis.summary.block_explanations?.performance} color={C.gold} />
             <Section
               eyebrow="SÉCURITÉ"
               title="Top 3 — Simple Placé"
-              text="Les profils les plus fiables pour conserver une place malgré plusieurs scénarios."
+              text="Chaque choix est justifié d’abord par sa régularité, ses références et sa capacité à répéter son effort ; la note /100 reste un repère secondaire."
             />
             {placed.length ? placed.slice(0, 3).map((score, index) => (
-              <RunnerCard key={`placed-${score.number}`} rank={index + 1} score={score} placed />
+              <RunnerCard key={`placed-${score.number}`} rank={index + 1} score={score} placed argument={placedArgument(score.number)} />
             )) : <EmptyState title="Classement placé en attente" text="Les données disponibles ne permettent pas encore de recommander un cheval pour une place." />}
             <Explanation text={analysis.summary.block_explanations?.placed} color={C.green} />
+
+            <Section
+              eyebrow="VALEUR MASQUÉE"
+              title="Top 3 — Potentiel caché"
+              text="Anciennes valeurs, progression masquée, aptitude et configuration sont expliquées avec leurs faits. Le score /100 reste secondaire."
+            />
+            <ArgumentRanking details={hiddenDetail} scores={allScores} />
+            <Explanation text={analysis.summary.block_explanations?.hidden_potential} color={C.purple} />
+
+            <Section
+              eyebrow="SCÉNARIOS DE COURSE"
+              title="Top 3 — Robustesse"
+              text="Capacité à rester compétitif malgré rythme, position, trafic, trajectoire ou ouverture tardive."
+            />
+            <ArgumentRanking details={robustnessDetail} scores={allScores} />
+            <Explanation text={analysis.summary.block_explanations?.robustness} color={C.blue} />
+
+            <Section
+              eyebrow="CONFIANCE / INCERTITUDE"
+              title="Top 3 — Faible volatilité"
+              text="Les profils les plus mesurables sont argumentés avant l’indicateur d’incertitude. Une faible volatilité ne remplace jamais la valeur sportive."
+            />
+            <ArgumentRanking details={volatilityDetail} scores={allScores} placed />
+            <Explanation text={analysis.summary.block_explanations?.volatility} color={C.coral} />
+
+            <Section
+              eyebrow="DOUBLE VALIDATION"
+              title="Top 3 — Convergence"
+              text="Chevaux qui ressortent simultanément dans la lecture Performance et la lecture Placé, avec les raisons factuelles de cette convergence."
+            />
+            <ArgumentRanking details={convergenceDetail} scores={allScores} />
+            <Explanation text={analysis.summary.block_explanations?.convergence} color={C.coral} />
+
+            <Section
+              eyebrow="PROFILS SECONDAIRES"
+              title="À ne pas négliger"
+              text="Chevaux hors des premières lignes dont un argument objectif distinct mérite d’être vu par le joueur."
+            />
+            {overlookDetail.length ? (
+              <ArgumentRanking details={overlookDetail} scores={allScores} />
+            ) : (
+              <EmptyState title="Aucun profil distinct" text="Aucun cheval supplémentaire ne possède actuellement un argument suffisamment différent des principaux choix." />
+            )}
+            <Explanation text={analysis.summary.block_explanations?.do_not_overlook} color={C.blue} />
+
+            <Section
+              eyebrow="SÉLECTION ÉLARGIE"
+              title="Jusqu’à 8 chevaux"
+              text="Ordre interne élargi avec un argument joueur pour chaque cheval retenu. Toujours sans cote ni verdict extérieur."
+            />
+            <ArgumentRanking details={selectionDetail} scores={allScores} />
+            <Explanation text={analysis.summary.block_explanations?.selection_8} color={C.muted} />
+
+            <Section
+              eyebrow="PARAMÈTRES RENFORCÉS"
+              title="Lecture croisée de tous les modules"
+              text="Lignes A→B→C→D, potentiel caché, robustesse, volatilité et styles de fin de course sont rapprochés sans modifier leurs classements indépendants."
+            />
+            <Explanation text={analysis.summary.block_explanations?.reinforced_parameters} color={C.gold} />
+
             <Synthesis analysis={analysis} />
             <Conclusion analysis={analysis} />
-            <View style={s.houseCard}>
-              <View style={s.houseHead}>
-                <Text style={s.houseMark}>H</Text>
-                <View style={{flex: 1}}>
-                  <Text style={s.houseKicker}>BLOC INDÉPENDANT</Text>
-                  <Text style={s.houseTitle}>Objectif visé par la maison</Text>
-                </View>
-              </View>
-              <Text style={s.houseText}>
-                Non déterminé tant que les données officielles ne permettent pas de vérifier
-                objectivement la préparation, les changements de pilote, de ferrure, d’équipement et
-                les engagements. Ce bloc ne modifie jamais les scores ni les classements.
-              </Text>
-            </View>
+
+            <Section
+              eyebrow="BLOC INDÉPENDANT — APRÈS LA CONCLUSION"
+              title="Course potentiellement ciblée / engagements"
+              text="HippoEdge recherche les répétitions objectives de programme, retour sur hippodrome/distance/catégorie, changement d’équipement et prochains engagements déjà publiés. Aucune intention d’entourage n’est inventée et ce bloc ne change aucun score."
+            />
+            {houseTargetDetail.length ? houseTargetDetail.map((item, index) => (
+              <TargetCard key={`target-${item.number}`} rank={index + 1} item={item} />
+            )) : (
+              <EmptyState
+                title="Aucune course cible démontrée"
+                text="Aucun indice objectif suffisamment précis. Le bloc reste volontairement présent au lieu d’être oublié."
+              />
+            )}
+            <Explanation text={analysis.summary.block_explanations?.house_target} color={C.gold} />
           </>
         )}
       </ScrollView>
     </SafeAreaView>
+  );
+}
+
+function ArgumentRanking({
+  details,
+  scores,
+  placed = false,
+}: {
+  details: Array<Record<string, any>>;
+  scores: Score[];
+  placed?: boolean;
+}) {
+  const byNumber = new Map(scores.map(score => [Number(score.number), score]));
+  if (!details.length) {
+    return <EmptyState title="Aucune sélection publiable" text="Le bloc reste présent, mais les preuves disponibles ne permettent pas de classer un cheval de façon fiable." />;
+  }
+  return (
+    <>
+      {details.map((item, index) => {
+        const score = byNumber.get(Number(item.number));
+        if (!score) return null;
+        return (
+          <RunnerCard
+            key={`argument-${String(item.number)}-${index}`}
+            rank={index + 1}
+            score={score}
+            placed={placed}
+            argument={String(item.argument || '')}
+          />
+        );
+      })}
+    </>
+  );
+}
+
+function TargetCard({rank, item}: {rank: number; item: Record<string, any>}) {
+  const future = Array.isArray(item.future_engagements) ? item.future_engagements : [];
+  const score = Number(item.score || 0);
+  const label = String(item.label || 'SIGNAL INFORMATIF');
+  return (
+    <View style={[s.runnerCard, rank === 1 && s.runnerRanked]}>
+      <View style={s.runnerTop}>
+        <View style={[s.rank, rank === 1 && s.rankFirst]}>
+          <Text style={[s.rankText, rank === 1 && s.rankTextFirst]}>{rank}</Text>
+        </View>
+        <View style={s.numberBox}>
+          <Text style={s.numberLabel}>N°</Text>
+          <Text style={s.numberValue}>{item.number}</Text>
+        </View>
+        <View style={{flex: 1}}>
+          <Text style={s.runnerName}>{item.horse_name}</Text>
+          <Text style={s.runnerReasons}>{label}</Text>
+        </View>
+        <View style={s.mainScoreCircle}>
+          <Text style={s.mainScore}>{Math.round(score)}</Text>
+          <Text style={s.mainScoreUnit}>/100 BLOC</Text>
+        </View>
+      </View>
+      <View style={s.paragraph}>
+        <View style={s.paragraphLine} />
+        <Text style={s.analysisText}>{String(item.argument || '')}</Text>
+      </View>
+      {future.length > 0 && (
+        <View style={s.networkBridgeList}>
+          <Text style={s.networkBridgeTitle}>PROCHAINS ENGAGEMENTS CONNUS</Text>
+          {future.slice(0, 3).map((engagement: any, index: number) => (
+            <Text key={`target-future-${item.number}-${index}`} style={s.networkBridgeText}>
+              • J+{Number(engagement.days_after || 0)} · {String(engagement.date || '—')} · {String(engagement.track || '—')} {String(engagement.race_code || '')}{engagement.distance_m ? ` · ${Number(engagement.distance_m)} m` : ''}.
+            </Text>
+          ))}
+        </View>
+      )}
+      <Text style={s.networkProof}>Bloc indépendant · n’influence aucun score ni verdict principal</Text>
+    </View>
   );
 }
 
@@ -1482,16 +1820,141 @@ function NetworkFact({value, label}: {value: string; label: string}) {
   );
 }
 
+function FinisherCard({rank, item}: {rank: number; item: Record<string, any>}) {
+  const confirmed = String(item.status || '') === 'confirmed';
+  const beautifulChance = item.beautiful_chance === true;
+  const score = Number(item.finisher_score || 0);
+  const evidenceRuns = Number(item.evidence_runs || 0);
+  return (
+    <View style={[s.runnerCard, rank === 1 && s.finisherPrimary]}>
+      <View style={s.runnerTop}>
+        <View style={[s.rank, rank === 1 && s.rankFirst]}>
+          <Text style={[s.rankText, rank === 1 && s.rankTextFirst]}>{rank}</Text>
+        </View>
+        <View style={s.numberBox}>
+          <Text style={s.numberLabel}>N°</Text>
+          <Text style={s.numberValue}>{item.number}</Text>
+        </View>
+        <View style={{flex: 1}}>
+          <Text style={s.runnerName}>{item.horse_name}</Text>
+          <Text style={s.runnerReasons}>
+            {confirmed ? 'FINISSEUR CONFIRMÉ' : 'FINISSEUR À CONFIRMER'}
+            {beautifulChance ? ' · BELLE CHANCE' : ''}
+          </Text>
+        </View>
+        <View style={[s.mainScoreCircle, rank === 1 && s.finisherScoreCircle]}>
+          <Text style={s.mainScore}>{Math.round(score)}</Text>
+          <Text style={s.mainScoreUnit}>FIN /100</Text>
+        </View>
+      </View>
+      <View style={s.paragraph}>
+        <View style={[s.paragraphLine, {backgroundColor: C.coral}]} />
+        <Text style={s.analysisText}>{String(item.argument || 'Signal final objectif détecté.')}</Text>
+      </View>
+      <View style={s.scoreGrid}>
+        <ScoreBadge label="Finisseur" value={score} color={C.coral} />
+        <ScoreBadge label="Perf" value={Number(item.performance || 0)} color={C.goldBright} />
+        <ScoreBadge label="Placé" value={Number(item.placed || 0)} color={C.green} />
+        <ScoreBadge label="Preuves" value={evidenceRuns} color={C.blue} />
+      </View>
+    </View>
+  );
+}
+
+function LateMoverCard({rank, item}: {rank: number; item: Record<string, any>}) {
+  const confirmed = String(item.status || '') === 'confirmed';
+  const beautifulChance = item.beautiful_chance === true;
+  const score = Number(item.late_mover_score || 0);
+  const evidenceRuns = Number(item.evidence_runs || 0);
+  return (
+    <View style={[s.runnerCard, rank === 1 && s.lateMoverPrimary]}>
+      <View style={s.runnerTop}>
+        <View style={[s.rank, rank === 1 && s.rankFirst]}>
+          <Text style={[s.rankText, rank === 1 && s.rankTextFirst]}>{rank}</Text>
+        </View>
+        <View style={s.numberBox}>
+          <Text style={s.numberLabel}>N°</Text>
+          <Text style={s.numberValue}>{item.number}</Text>
+        </View>
+        <View style={{flex: 1}}>
+          <Text style={s.runnerName}>{item.horse_name}</Text>
+          <Text style={s.runnerReasons}>
+            {confirmed ? 'PROGRESSIF TARDIF CONFIRMÉ' : 'PROGRESSIF TARDIF À CONFIRMER'}
+            {beautifulChance ? ' · BELLE CHANCE' : ''}
+          </Text>
+        </View>
+        <View style={[s.mainScoreCircle, rank === 1 && s.lateMoverScoreCircle]}>
+          <Text style={s.mainScore}>{Math.round(score)}</Text>
+          <Text style={s.mainScoreUnit}>PROG /100</Text>
+        </View>
+      </View>
+      <View style={s.paragraph}>
+        <View style={[s.paragraphLine, {backgroundColor: C.blue}]} />
+        <Text style={s.analysisText}>{String(item.argument || 'Remontée tardive soutenue objectivement détectée.')}</Text>
+      </View>
+      <View style={s.scoreGrid}>
+        <ScoreBadge label="Progressif" value={score} color={C.blue} />
+        <ScoreBadge label="Perf" value={Number(item.performance || 0)} color={C.goldBright} />
+        <ScoreBadge label="Placé" value={Number(item.placed || 0)} color={C.green} />
+        <ScoreBadge label="Preuves" value={evidenceRuns} color={C.purple} />
+      </View>
+    </View>
+  );
+}
+
+function FinisherResistanceCard({rank, item}: {rank: number; item: Record<string, any>}) {
+  const confirmed = String(item.status || '') === 'confirmed';
+  const score = Number(item.resistance_score || 0);
+  const supportRuns = Number(item.support_runs || 0);
+  const uniqueFinishers = Number(item.unique_finishers || 0);
+  const chanceLabel = String(item.chance_label || 'SIGNAL INDÉPENDANT');
+  return (
+    <View style={[s.runnerCard, rank === 1 && s.finisherResistancePrimary]}>
+      <View style={s.runnerTop}>
+        <View style={[s.rank, rank === 1 && s.rankFirst]}>
+          <Text style={[s.rankText, rank === 1 && s.rankTextFirst]}>{rank}</Text>
+        </View>
+        <View style={s.numberBox}>
+          <Text style={s.numberLabel}>N°</Text>
+          <Text style={s.numberValue}>{item.number}</Text>
+        </View>
+        <View style={{flex: 1}}>
+          <Text style={s.runnerName}>{item.horse_name}</Text>
+          <Text style={s.runnerReasons}>
+            {confirmed ? 'RÉSISTANT AUX FINISSEURS CONFIRMÉ' : 'RÉSISTANCE À CONFIRMER'} · {chanceLabel}
+          </Text>
+        </View>
+        <View style={[s.mainScoreCircle, rank === 1 && s.finisherResistanceScoreCircle]}>
+          <Text style={s.mainScore}>{Math.round(score)}</Text>
+          <Text style={s.mainScoreUnit}>RÉS /100</Text>
+        </View>
+      </View>
+      <View style={s.paragraph}>
+        <View style={[s.paragraphLine, {backgroundColor: C.green}]} />
+        <Text style={s.analysisText}>{String(item.argument || 'Résistance directe à un finisseur du lot objectivement détectée.')}</Text>
+      </View>
+      <View style={s.scoreGrid}>
+        <ScoreBadge label="Résistance" value={score} color={C.green} />
+        <ScoreBadge label="Finisseurs contenus" value={uniqueFinishers} color={C.coral} />
+        <ScoreBadge label="Confrontations" value={supportRuns} color={C.blue} />
+        <ScoreBadge label="Placé" value={Number(item.placed || 0)} color={C.goldBright} />
+      </View>
+    </View>
+  );
+}
+
 function RunnerCard({
   rank,
   score,
   placed = false,
   detailed = false,
+  argument,
 }: {
   rank: number | null;
   score: Score;
   placed?: boolean;
   detailed?: boolean;
+  argument?: string;
 }) {
   const breakdown = score.breakdown || {};
   const rankable = scoreIsRankable(score);
@@ -1528,6 +1991,12 @@ function RunnerCard({
           <Text style={[s.mainScoreUnit, !rankable && s.mainScoreUnitLimited]}>{rankable ? '/100' : 'NON CLASSÉ'}</Text>
         </View>
       </View>
+      {!!argument && !detailed && (
+        <View style={s.paragraph}>
+          <View style={s.paragraphLine} />
+          <Text style={s.analysisText}>{argument}</Text>
+        </View>
+      )}
       {!!detailed && (
         <View>
           <View style={s.paragraph}>
@@ -1609,14 +2078,26 @@ function Synthesis({analysis}: {analysis: Analysis}) {
       <Explanation text={analysis.summary.block_explanations?.placed} color={C.green} />
       <Insight index="03" label="Potentiel caché" value={(analysis.summary.hidden_potential || []).join(' – ')} color={C.purple} />
       <Explanation text={analysis.summary.block_explanations?.hidden_potential} color={C.purple} />
-      <Insight index="04" label="Convergence" value={(analysis.summary.best_convergence || []).join(' – ')} color={C.coral} />
+      <Insight index="04" label="Robustesse scénario" value={(analysis.summary.robustness_top3 || []).join(' – ')} color={C.blue} />
+      <Explanation text={analysis.summary.block_explanations?.robustness} color={C.blue} />
+      <Insight index="05" label="Faible volatilité" value={(analysis.summary.low_volatility_top3 || []).join(' – ')} color={C.coral} />
+      <Explanation text={analysis.summary.block_explanations?.volatility} color={C.coral} />
+      <Insight index="06" label="Convergence" value={(analysis.summary.best_convergence || []).join(' – ')} color={C.coral} />
       <Explanation text={analysis.summary.block_explanations?.convergence} color={C.coral} />
-      <Insight index="05" label="À ne pas négliger" value={(analysis.summary.do_not_overlook || []).join(' – ') || 'Aucun profil distinct'} color={C.blue} />
+      <Insight index="07" label="À ne pas négliger" value={(analysis.summary.do_not_overlook || []).join(' – ') || 'Aucun profil distinct'} color={C.blue} />
       <Explanation text={analysis.summary.block_explanations?.do_not_overlook} color={C.blue} />
-      <Insight index="06" label="Réseau des adversaires — indépendant" value={(analysis.summary.opponent_network_top3 || []).join(' – ') || 'Données insuffisantes'} color={C.blue} />
+      <Insight index="08" label="Réseau des adversaires — indépendant" value={(analysis.summary.opponent_network_top3 || []).join(' – ') || 'Données insuffisantes'} color={C.blue} />
       <Explanation text={analysis.summary.block_explanations?.opponent_network} color={C.blue} />
-      <Insight index="07" label="Sélection élargie" value={(analysis.summary.selection_8 || []).join(' – ')} color={C.muted} />
+      <Insight index="09" label="Finisseurs purs — indépendant" value={(analysis.summary.finisher_top3 || []).join(' – ') || 'Aucun finisseur publiable'} color={C.coral} />
+      <Explanation text={analysis.summary.block_explanations?.finisher} color={C.coral} />
+      <Insight index="10" label="Progressifs tardifs — indépendant" value={(analysis.summary.late_mover_top3 || []).join(' – ') || 'Aucun progressif tardif publiable'} color={C.blue} />
+      <Explanation text={analysis.summary.block_explanations?.late_mover} color={C.blue} />
+      <Insight index="11" label="Résistance aux finisseurs — indépendant" value={(analysis.summary.finisher_resistance_top3 || []).join(' – ') || 'Aucune résistance démontrée'} color={C.green} />
+      <Explanation text={analysis.summary.block_explanations?.finisher_resistance} color={C.green} />
+      <Insight index="12" label="Sélection élargie" value={(analysis.summary.selection_8 || []).join(' – ')} color={C.muted} />
       <Explanation text={analysis.summary.block_explanations?.selection_8} color={C.muted} />
+      <Insight index="13" label="Paramètres renforcés" value="Voir le bloc argumenté ci-dessus" color={C.gold} />
+      <Explanation text={analysis.summary.block_explanations?.reinforced_parameters} color={C.gold} />
     </View>
   );
 }
@@ -2012,6 +2493,12 @@ const s = StyleSheet.create({
   networkProof: {color: C.green, fontSize: 9.5, fontWeight: '800'},
   runnerCard: {backgroundColor: C.card, borderRadius: 21, borderWidth: 1, borderColor: C.lineSoft, padding: 15, gap: 13},
   runnerRanked: {borderColor: '#2F2E29'},
+  finisherPrimary: {borderColor: '#7A493E', backgroundColor: '#15100F'},
+  finisherScoreCircle: {borderColor: C.coral},
+  lateMoverPrimary: {borderColor: '#315D75', backgroundColor: '#0C141A'},
+  lateMoverScoreCircle: {borderColor: C.blue},
+  finisherResistancePrimary: {borderColor: '#315D4A', backgroundColor: '#0C1511'},
+  finisherResistanceScoreCircle: {borderColor: C.green},
   runnerCardLimited: {backgroundColor: '#0C1016', borderColor: '#242934'},
   runnerTop: {flexDirection: 'row', alignItems: 'center', gap: 9},
   rank: {width: 29, height: 29, borderRadius: 15, backgroundColor: C.raised, borderWidth: 1, borderColor: C.line, alignItems: 'center', justifyContent: 'center'},

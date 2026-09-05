@@ -38,3 +38,10 @@ Contrôle effectué avant livraison selon la méthode fusionnée des conversatio
 - Contrôle sur les réponses réelles : aucun champ de cote, rapport, pronostic ou commentaire éditorial dans les données mappées.
 
 Les accès privés, clés de licence et mots de passe ne sont pas enregistrés dans le projet.
+
+## Finisseurs v6.9.8
+- [x] Aucune cote / favori / tipster / presse dans le module.
+- [x] Aucune note éditoriale de fin de course utilisée.
+- [x] Une place finale seule ne suffit pas à créer un finisseur.
+- [x] Top 3 non forcé si le n°1 n'est pas aussi une belle chance actuelle.
+- [x] Poids du volet Finisseurs dans les scores principaux : 0.

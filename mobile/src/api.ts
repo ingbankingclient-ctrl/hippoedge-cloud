@@ -18,6 +18,7 @@ export const Api={
   analyzeSelections:(day:string,signal?:AbortSignal)=>req<any>(`/api/day/${day}/analyze-selections`,{method:'POST',signal}),
   historyStatus:(day:string)=>req<any>(`/api/day/${day}/history-status`),
   dashboard:(day:string)=>req<any>(`/api/day/${day}/dashboard`),
+  queue:(day:string)=>req<any>(`/api/day/${day}/queue`),
   prepareDay:(day:string)=>req<any>(`/api/day/${day}/prepare`,{method:'POST'}),
   refresh:(day:string)=>req<any>(`/api/refresh?day=${day}`,{method:'POST'}),
   analysis:(id:number,force=false)=>req<Analysis>(`/api/races/${id}/analysis?force=${force}`),

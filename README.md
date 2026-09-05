@@ -2,7 +2,7 @@
 
 HippoEdge est un produit complet **mobile + API** conçu pour analyser automatiquement les réunions/courses PMU du jour et du lendemain en appliquant une méthode indépendante des cotes, favoris et pronostics externes.
 
-La version **v6.9.7 — Préchargement permanent + affichage instantané** prépare automatiquement J0 et J+1 en arrière-plan. Elle lit tout le tableau de carrière public que la source publie pour chaque cheval Geny identifié avec certitude, sans plafond local de 500 lignes, puis rouvre chaque ancienne course par son identifiant exact pour récupérer tous les partants et résultats. Les téléchargements sont dédupliqués, limités en débit, enregistrés course par course et repris automatiquement après une interruption de l’hébergeur. Une musique comme `1a2a3a` n'est jamais assimilée à trois courses détaillées et aucun choix public n’est produit lorsque les preuves minimales manquent.
+La version **v6.9.12 — file chronologique + publication immédiate** prépare automatiquement les courses **une par une, dans l’ordre des départs**. HippoEdge termine d’abord les courses de **J0** ; dès qu’une course possède son snapshot complet, cette analyse devient immédiatement accessible à tous les utilisateurs, sans attendre les autres courses. Ce n’est qu’après avoir parcouru la file J0 que le moteur commence le travail lourd sur **J+1**. Les programmes J+1 peuvent rester importés en avance, mais leurs carrières/réseaux ne prennent jamais la priorité sur les pronostics du jour. Elle lit tout le tableau de carrière public que la source publie pour chaque cheval Geny identifié avec certitude, sans plafond local de 500 lignes, puis rouvre chaque ancienne course par son identifiant exact pour récupérer tous les partants et résultats. Les téléchargements sont dédupliqués, limités en débit, enregistrés course par course et repris automatiquement après une interruption de l’hébergeur. Une musique comme `1a2a3a` n'est jamais assimilée à trois courses détaillées et aucun choix public n’est produit lorsque les preuves minimales manquent.
 
 ## Ce qui est déjà livré
 
@@ -10,7 +10,7 @@ La version **v6.9.7 — Préchargement permanent + affichage instantané** prép
 - API **FastAPI**.
 - Base SQLAlchemy : SQLite par défaut, PostgreSQL possible via `DATABASE_URL`.
 - Import léger automatique **jour J + J+1** (programme, partants, résultats).
-- Les carrières complètes, anciennes courses recroisées et scores lourds sont préparés automatiquement en arrière-plan pour J0/J+1. Les pages Course et Sélections lisent ensuite des snapshots persistés au lieu de recalculer au clic.
+- Les carrières complètes, anciennes courses recroisées et scores lourds sont préparés automatiquement **course par course**. Chaque snapshot validé est publié immédiatement en base ; la page Course peut donc ouvrir R1C1 pendant que R1C2 est encore en calcul. La page Sélections affiche des choix provisoires fondés uniquement sur les courses déjà prêtes, puis les met à jour à chaque nouvelle course analysée.
 - Accueil « Sélections du jour », menu mobile Réunion → Course et écran dédié aux arrivées provisoires/officielles.
 - Programme → réunions → courses → partants → historique chevaux.
 - Préparation complète avant ouverture : une course devient accessible quand son snapshot courant est prêt ; les faits déjà récupérés restent en base et sont réutilisés aux cycles suivants.
@@ -43,7 +43,7 @@ La version **v6.9.7 — Préchargement permanent + affichage instantané** prép
   - robustesse au scénario et volatilité traitées séparément.
 - Snapshot pré-course **verrouillable** et verrouillage automatique avant le départ.
 - Résultats post-course + statistiques sans réécriture rétroactive.
-- Import permanent du programme et des résultats, préchargement séquentiel J0/J+1, rafraîchissement périodique des profils devenus anciens, cache persistant des anciennes courses et snapshots pré-calculés. Une course ouverte n’effectue plus de téléchargement lourd.
+- Import permanent du programme et des résultats, **file chronologique J0 prioritaire puis J+1**, rafraîchissement périodique des profils devenus anciens, détection des changements de carte (non-partant, poids, corde, équipement, jockey/driver, etc.), cache persistant des anciennes courses et snapshots pré-calculés. Une course déjà prête s’ouvre sans téléchargement lourd.
 - Tests automatiques du scoring et du pare-feu anti-pronostics.
 
 ## Pare-feu d’indépendance
@@ -201,3 +201,30 @@ HippoEdge ne tente plus de recroiser les milliers de lignes historiques de toute
 Validation : **73 tests backend passent**. Syntaxe TypeScript de `App.tsx` et `src/api.ts` vérifiée.
 
 Méthodologie : `2026.09.04-v6.9.7-preloaded-live`.
+
+### v6.9.8 — Volet Finisseurs
+
+Ajout d'un bloc indépendant « Top 3 — Finisseurs » dans chaque analyse de course. Le moteur utilise uniquement des faits de déroulement final disponibles (positions intermédiaires, places gagnées en fin de course, rangs de sectionnels). Le premier profil n'est publié que s'il constitue également une belle chance actuelle selon les scores principaux HippoEdge. Les données de marché, pronostics et notes éditoriales restent hors du moteur.
+
+### v6.9.9 — Arguments joueurs + Progressif tardif
+
+Les notes `/100` restent visibles comme repères internes, mais elles ne constituent plus l'explication principale affichée au joueur. HippoEdge produit désormais des arguments factuels par bloc et par cheval : dernières performances documentées, positions et marges, distance/hippodrome comparables, progression réelle, régularité, lignes d'adversaires et chaînes vérifiées, paramètres du jour et point de vigilance. Les textes sont assemblés exclusivement à partir des données objectives déjà admises par le pare-feu ; aucune cote, favori, pronostic, avis de presse ou commentaire éditorial n'est utilisé.
+
+Le volet de fin de course distingue désormais deux comportements :
+- **Finisseur pur** : gagne réellement des places ou produit un meilleur dernier tronçon dans la phase terminale ;
+- **Progressif tardif / Late mover** : remonte nettement avant la toute dernière phase puis soutient cet effort jusqu'au poteau (exemple factuel `7e → 4e → 4e`).
+
+Les deux listes sont indépendantes des scores principaux. Le n°1 de chaque Top 3 doit également constituer une belle chance actuelle HippoEdge ; sinon aucune tête de liste n'est forcée.
+
+Validation v6.9.9 : **85 tests backend passent**. Méthodologie : `2026.09.05-v6.9.9-arguments-late-mover`.
+
+
+### v6.9.11 — réseau des styles de fin de course
+Ajout de la résistance aux finisseurs et des contre-preuves directes entre chevaux du jour. Les arguments de confrontation sont affichés avant les notes /100.
+
+
+## v6.9.11 — FULL METHOD AUDITED
+
+Cette version verrouille la présentation complète de chaque course : 18 blocs permanents contrôlés, arguments avant les notes, Top 3 Potentiel caché/Robustesse/Faible volatilité rendus explicitement, Finisseur/Late mover/Résistance séparés, Paramètres renforcés, et bloc Course ciblée / engagements calculé à partir de faits objectifs puis affiché après la Conclusion nette.
+
+Le Bilan distingue les courses historiques uniques des lignes de performances et protège l'affichage contre les réponses HTTP anciennes qui pouvaient donner l'impression que l'avancement reculait.

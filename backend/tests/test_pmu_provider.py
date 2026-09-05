@@ -177,3 +177,31 @@ def test_international_discipline_labels_keep_trot_and_galop_families():
     assert _normalize_discipline("Harness racing") == "Trot attelé"
     assert _normalize_discipline("Mounted trot") == "Trot monté"
     assert _normalize_discipline("Thoroughbred flat") == "Plat"
+
+
+def test_detailed_performances_keep_objective_finisher_facts():
+    payload = {
+        "participants": [{
+            "numPmu": 5,
+            "nomCheval": "FINISHER TEST",
+            "coursesCourues": [{
+                "date": 1788213600000,
+                "timezoneOffset": 7200000,
+                "hippodrome": "Test",
+                "distance": 1800,
+                "nbParticipants": 12,
+                "participants": [{
+                    "nomCheval": "FINISHER TEST",
+                    "itsHim": True,
+                    "place": {"place": 2, "statusArrivee": "PLACE"},
+                    "positionsIntermediaires": [10, 8, 5, 2],
+                    "placesGagneesDerniers600m": 3,
+                    "rangDerniers600m": 1,
+                }],
+            }],
+        }],
+    }
+    row = PmuProvider.normalize_detailed_performances(payload)["data"]["runners"][0]["historique"][0]
+    assert row["positions_intermediaires"] == [10, 8, 5, 2]
+    assert row["places_gagnees_fin"] == 3
+    assert row["rang_dernier_troncon"] == 1

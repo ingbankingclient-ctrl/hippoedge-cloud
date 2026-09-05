@@ -8,6 +8,7 @@ import math
 import re
 
 from .models import HorseHistory, Race, Runner
+from .finisher import finisher_profile, late_mover_profile
 from .opponent_network import build_opponent_network
 from .utils import clip, mean
 
@@ -613,29 +614,31 @@ def analysis_paragraph(
 
     reading = _score_level(
         performance,
-        "Son niveau objectif le place parmi les candidatures fortes pour la victoire.",
-        "Son potentiel de performance est intermédiaire et demande confirmation face à ce lot.",
-        "Ses preuves actuelles sont insuffisantes pour en faire une priorité de victoire.",
+        "La qualité de ses références le place parmi les candidatures fortes pour la victoire.",
+        "Ses références lui donnent une chance intermédiaire, mais il doit encore confirmer face à ce lot.",
+        "Ses preuves disponibles ne suffisent pas à en faire une priorité pour la victoire.",
     )
     safety = _score_level(
         placed,
-        "Son profil placé est solide",
-        "Sa sécurité pour une place est moyenne",
-        "Son profil placé est fragile",
+        "Pour une place, sa répétabilité est un point favorable.",
+        "Pour une place, son dossier reste partagé entre arguments positifs et zones d'incertitude.",
+        "Pour une place, les garanties objectives restent fragiles.",
     )
     volatility = "faible" if uncertainty <= 30 else "moyenne" if uncertainty < 60 else "élevée"
-    signals = (" Points déterminants : " + "; ".join(reasons[:3]) + ".") if reasons else ""
+    signals = (" Les arguments retenus par le moteur sont : " + "; ".join(reasons[:4]) + ".") if reasons else ""
     hidden_text = (
-        f" Un potentiel moins visible est détecté ({hidden:.0f}/100), mais il doit être confirmé."
+        " Un potentiel caché est également détecté : la forme brute ne raconte donc pas forcément toute sa valeur."
         if hidden >= 62
         else " Aucun potentiel caché suffisamment fort ne ressort actuellement."
     )
+    numeric = (
+        f" Repères chiffrés secondaires : Performance {performance:.0f}/100, Placé {placed:.0f}/100, "
+        f"Robustesse {robust:.0f}/100, Volatilité {uncertainty:.0f}/100."
+    )
     return (
-        f"{identity}{profile}{race_sentence}{evidence}{details} {reading.rstrip('.')}. "
-        f"{safety} (Performance {performance:.0f}/100, Placé {placed:.0f}/100). "
-        f"Sa résistance aux différents scénarios est de {robust:.0f}/100 et l’incertitude est {volatility} "
-        f"({uncertainty:.0f}/100 : plus ce chiffre est haut, moins la prévision est sûre)."
-        f"{hidden_text}{signals}"
+        f"{identity}{profile}{race_sentence}{evidence}{details} {reading} {safety}"
+        f"{hidden_text}{signals} Le niveau d'incertitude est {volatility}."
+        f"{numeric}"
     )
 
 
@@ -660,6 +663,8 @@ def score_race(race: Race, runners: list[Runner]) -> dict[int, ScoreCard]:
         uncertainty = sample_uncertainty(hist, runner, runner.recent_form)
         network = network_cards[runner.id]
         line = network.score
+        finisher = finisher_profile(hist)
+        late_mover = late_mover_profile(hist)
         equip, eq_reasons = equipment_signal(runner, hist)
         value_signal = objective_value_score(race, runner, active)
         risk = dq_risk(hist, runner.recent_form)
@@ -765,6 +770,8 @@ def score_race(race: Race, runners: list[Runner]) -> dict[int, ScoreCard]:
                 "history_source": (runner.raw or {}).get("history_source") if isinstance(runner.raw, dict) else None,
                 "history": _history_breakdown(hist),
                 "opponent_network": network.as_dict(),
+                "finisher": finisher.as_dict(),
+                "late_mover": late_mover.as_dict(),
                 "analysis_text": paragraph,
             },
         )

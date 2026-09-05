@@ -315,6 +315,26 @@ class PmuProvider(RacingProvider):
                     ),
                     "nb_partants": course.get("nbParticipants"),
                     "allocation_eur": course.get("allocation"),
+                    # Objective late-race facts only. Provider comments, odds
+                    # and predictions stay outside the Finisseur module.
+                    "positions_intermediaires": (
+                        own.get("positionsIntermediaires")
+                        or own.get("positionsIntermediairesCourse")
+                        or own.get("passages")
+                        or own.get("classementsIntermediaires")
+                    ),
+                    "places_gagnees_fin": (
+                        own.get("placesGagneesFinCourse")
+                        or own.get("placesGagneesDerniers400m")
+                        or own.get("placesGagneesDerniers500m")
+                        or own.get("placesGagneesDerniers600m")
+                    ),
+                    "rang_dernier_troncon": (
+                        own.get("rangDernierTroncon")
+                        or own.get("rangDerniers400m")
+                        or own.get("rangDerniers500m")
+                        or own.get("rangDerniers600m")
+                    ),
                     "adversaires": opponents,
                     "source": "PMU performances détaillées",
                 }

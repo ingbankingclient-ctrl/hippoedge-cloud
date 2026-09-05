@@ -75,23 +75,32 @@ Une forte volatilité interdit d’appeler le cheval « sûr », notamment pour 
 
 Un faible nombre de courses n’exclut jamais automatiquement un cheval. Il réduit seulement la certitude accordée aux notes. Une amélioration calculée sur une seule transition est ramenée vers une valeur neutre ; elle ne devient forte que si le résultat récent apporte lui-même une preuve de niveau. Ainsi, `0p → 6p` constitue une amélioration mesurée, mais jamais une progression exceptionnelle. À l’inverse, un cheval peu expérimenté ayant déjà produit une performance de haut niveau dans une catégorie comparable reste pleinement éligible.
 
-## 10. Présentation obligatoire de chaque course
+## 10. Présentation obligatoire de chaque course — contrat anti-oubli
 
-1. Présentation et conditions de course
-2. Tableau complet de tous les chevaux : numéro, cheval, paragraphe factuel, Performance, Placé, Potentiel caché, Robustesse, Volatilité
-3. Top 3 — Modèle complet / Performance-Victoire
-4. Top 3 — Spécial Simple Placé
-5. Convergence
-6. Un ou deux chevaux « À ne pas négliger »
-7. Réseau des adversaires : classement indépendant, couverture et paragraphe pour chaque cheval
-8. Sélection élargie jusqu’à 8
-9. Choix gagnant
-10. Choix placé
-11. Synthèse exacte : 🏆 Top 3, 🛡️ Placé, 💎 Potentiel caché, 🔥 Convergence, 🔗 Réseau indépendant, 🎟️ Sélection 8
-12. Conclusion nette : cheval à battre, danger principal, choix rationnel pour une place, verdict final chiffré, compléments éventuels
-13. Seulement ensuite : bloc indépendant « Course potentiellement ciblée / objectif visé par la maison »
+Une analyse HippoEdge n'est considérée complète que si **tous** les blocs permanents existent. Un bloc sans preuve doit afficher « données insuffisantes / aucun signal démontré » ; il ne doit jamais disparaître silencieusement. Le backend expose un manifeste `required_blocks`, `completed_blocks`, `missing_blocks` et `method_complete`, vérifié automatiquement par les tests.
 
-Le bloc maison étudie séparément habitudes de préparation, changements de pilote/ferrure/équipement, qualité d’engagement et autres engagements déclarés. Il ne modifie jamais scores, Top 3, Simple Placé, « À ne pas négliger », classement ou conclusion.
+Ordre obligatoire :
+
+1. Présentation et conditions de course.
+2. Tableau complet cheval par cheval : paragraphe factuel avant les notes, historique complet disponible, Performance, Placé, Potentiel caché, Robustesse, Volatilité.
+3. Réseau des adversaires indépendant : confrontations directes, performances ultérieures des adversaires et chaînes jusqu'à A→B→C→D.
+4. Finisseurs purs — bloc indépendant.
+5. Progressifs tardifs / Late movers — bloc indépendant.
+6. Résistance aux finisseurs — bloc indépendant et confrontation des styles.
+7. Top 3 Performance / Victoire avec arguments avant les /100.
+8. Top 3 Simple Placé / Sécurité avec arguments avant les /100.
+9. Top 3 Potentiel caché avec arguments.
+10. Top 3 Robustesse au scénario avec arguments.
+11. Top 3 Faible volatilité / confiance avec arguments.
+12. Convergence Performance + Placé avec arguments.
+13. Un ou deux chevaux « À ne pas négliger » avec arguments.
+14. Sélection élargie jusqu'à 8, avec un argument joueur pour chaque cheval.
+15. Bloc « Paramètres renforcés » : réseau A→B→C→D, potentiel caché, robustesse, volatilité et styles de fin de course rapprochés sans fusionner leurs scores.
+16. Synthèse exacte et choix gagnant / choix placé.
+17. Conclusion nette : cheval à battre, danger principal, choix rationnel pour une place, verdict final chiffré, compléments éventuels.
+18. **Seulement après la conclusion** : bloc indépendant « Course potentiellement ciblée / engagements ».
+
+Le bloc Course ciblée / engagements étudie séparément les répétitions objectives de programme (même intitulé si publié, même hippodrome/distance/catégorie), continuité récente de distance, changements factuels d'équipement et prochains engagements déjà déclarés, y compris J+0 lorsque le cheval est recouru plus tard le même jour. Il ne prétend jamais connaître une intention privée de l'entourage. Il ne modifie jamais Performance, Placé, Potentiel caché, Robustesse, Volatilité, Top 3, Simple Placé, sélection 8 ou conclusion.
 
 ## 11. Sélections par réunion et journée — indices approfondis
 
@@ -151,3 +160,68 @@ Le moment du calcul change, pas la méthode. HippoEdge prépare J0/J+1 en arriè
 Une journée n’est déclarée `ready` que lorsque les profils ne sont plus en état `pending/loading`, que les anciennes courses identifiées ne sont plus en attente de recroisement et que chaque course chargée possède un snapshot de la version méthodologique courante. Les débutants peuvent être « vérifiés » sans historique : ils restent visibles mais non transformés en choix s’ils n’atteignent pas les seuils de preuve.
 
 Le volet « Engagements futurs » est informatif et indépendant des classements. Un cheval retrouvé dans un programme ultérieur est signalé avec son prochain engagement connu, mais cette information ne modifie aucune note principale sans preuve factuelle supplémentaire sur un objectif d’entourage.
+
+## Volet Finisseurs — indépendant (v6.9.8)
+
+HippoEdge publie désormais, lorsque les preuves le permettent, un **Top 3 Finisseurs** séparé des classements Performance/Victoire et Placé/Sécurité.
+
+Règles :
+- un cheval n'est jamais déclaré finisseur à partir de sa seule place à l'arrivée ;
+- le moteur recherche des **positions intermédiaires**, des **places gagnées dans la phase finale** et/ou un **rang de dernier tronçon/sectionnel** publiés comme faits de course ;
+- les cotes, favoris, pronostics, avis de presse, recommandations et **notes éditoriales de fin de course** sont exclus ;
+- un signal répété sur plusieurs courses est nécessaire pour le statut « finisseur confirmé » ; un seul signal peut rester « à confirmer » ;
+- le **n°1 du Top 3 Finisseurs doit obligatoirement être aussi une belle chance actuelle** selon les propres scores HippoEdge et les seuils de fiabilité ;
+- si aucun finisseur détecté ne remplit cette condition, aucun Top 3 n'est forcé ;
+- ce volet a un poids **nul** dans Performance/Victoire, Placé/Sécurité et dans tous les autres classements principaux.
+
+Le but est de reconnaître un vrai comportement de fin de course, pas de transformer un bon résultat passé en style de course supposé.
+
+## Arguments joueurs et Progressif tardif (v6.9.9)
+
+La présentation donne désormais la priorité aux **preuves lisibles par le joueur** avant les notes. Pour chaque cheval retenu dans un bloc, HippoEdge doit expliquer ce qui justifie sa présence avec des faits disponibles avant la course : résultats récents avec contexte, marges, distance et hippodrome, régularité, progression, lignes directes/indirectes, comportement dans le parcours, configuration du jour et risque principal. Les `/100` restent affichés, mais comme repères secondaires.
+
+Le moteur ne transforme jamais une note interne en argument. Une phrase doit pouvoir être rattachée à un fait enregistré ou à une relation objective calculée à partir de ces faits. Les commentaires éditoriaux, cotes, favoris, pronostics et verdicts externes restent interdits, même s'ils décrivent correctement le cheval après coup.
+
+Le volet de fin de course est scindé en deux profils :
+
+1. **Finisseur pur** : gain de places ou sectionnel supérieur dans la phase terminale. Une bonne place finale seule ne suffit pas.
+2. **Progressif tardif / Late mover** : gain d'au moins deux places dans la partie tardive précédant la phase finale, puis position maintenue ou encore améliorée jusqu'au poteau. Un cheval qui remonte puis s'effondre de plus d'une place dans la phase terminale n'est pas validé dans ce sous-volet.
+
+Un cheval peut appartenir aux deux profils s'il commence sa remontée avant le sprint final et continue ensuite à gagner du terrain. Les deux sous-volets restent indépendants de Performance/Victoire et Placé/Sécurité. Le premier cheval publié dans chacun d'eux doit également passer le filtre « belle chance actuelle » ; aucun choix n'est forcé lorsque cette condition manque.
+
+
+## Forces de fin de course — v6.9.10
+
+Trois profils indépendants sont distingués sans cotes, favoris, pronostics ni commentaires éditoriaux :
+
+- **Finisseur pur** : gain de places / meilleur dernier tronçon objectivement mesuré dans la phase terminale.
+- **Progressif tardif / Late mover** : remontée avant la toute dernière phase puis effort soutenu jusqu’au poteau.
+- **Résistance aux finisseurs** : un cheval n’obtient ce signal que s’il a terminé devant un finisseur présent dans le lot **dans la même course qui constitue une preuve objective de finish pour ce rival**. Une simple victoire passée sur ce rival, dans une autre course, ne suffit pas.
+
+Lorsque plusieurs finisseurs sont présents, la répétition et le nombre de finisseurs distincts contenus renforcent la preuve. Les contre-signaux sont conservés. Ces blocs restent indépendants des scores principaux et leurs arguments factuels sont affichés avant les notes /100.
+
+
+## v6.9.11 — Full Method Audited
+
+- Arguments joueurs affichés avant les notes /100 dans tous les classements principaux et renforcés.
+- Course ciblée / engagements calculée objectivement et affichée systématiquement après la conclusion.
+- Finisseur pur, Late mover et Résistance aux finisseurs restent trois profils séparés ; plusieurs chevaux peuvent être classés dans chaque sous-réseau.
+- Le compteur du Bilan sépare désormais **courses historiques uniques** et **lignes de performances**. Une même ancienne course partagée par plusieurs chevaux n'est plus comptée plusieurs fois dans le compteur « courses uniques ».
+- Le client empêche un vieux rafraîchissement HTTP de faire visuellement reculer le compteur persistant de courses historiques déjà recroisées.
+- Le manifeste anti-oubli rend les 18 blocs permanents vérifiables automatiquement.
+
+
+## v6.9.12 — orchestration chronologique sans attente de journée complète
+
+Cette version **ne modifie aucun des 18 blocs méthodologiques ni leurs règles d’indépendance**. Elle change uniquement l’ordre d’exécution du moteur lourd.
+
+1. Le programme officiel J0/J+1 reste importé et rafraîchi en continu.
+2. Le moteur sélectionne les courses de J0 qui n’ont pas encore de snapshot courant, triées par heure de départ.
+3. Pour la première course, il charge/actualise les profils complets, recroise toutes les anciennes courses utiles, construit le réseau A→B→C→D, calcule les 18 blocs et **enregistre immédiatement le snapshot**.
+4. Cette course devient consultable immédiatement, même si toutes les autres sont encore en attente.
+5. Le moteur passe ensuite à la course suivante de J0.
+6. Après avoir parcouru J0, il traite J+1 selon le même principe.
+7. À chaque cycle, les courses déjà prêtes sont recontrôlées si leurs profils sont devenus anciens ou si la carte factuelle a changé (non-partant, poids, corde, équipement, jockey/driver, conditions, etc.).
+8. Une course déjà partie sans snapshot pré-course n’est pas transformée rétroactivement en pronostic.
+
+La page Sélections peut donc être **provisoire** : elle compare uniquement les courses déjà analysées, puis se recalcule à mesure que la file chronologique avance. Les choix deviennent complets lorsque la file J0 est terminée.

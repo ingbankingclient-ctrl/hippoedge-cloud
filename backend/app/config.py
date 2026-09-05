@@ -53,7 +53,7 @@ class Settings(BaseSettings):
     history_profile_refresh_seconds: int = 1800
     future_engagement_days: int = 30
     auto_lock_minutes_before: int = 2
-    methodology_version: str = "2026.09.04-v6.9.7-preloaded-live"
+    methodology_version: str = "2026.09.05-v6.9.12-chronological-instant-release"
     cors_origins: str = "*"
 
     model_config = SettingsConfigDict(

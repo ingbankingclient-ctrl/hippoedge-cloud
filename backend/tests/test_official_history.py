@@ -391,3 +391,26 @@ def test_provider_caches_are_bounded_without_truncating_returned_history():
     assert len(client._geny_course_cache) == 2
     assert "101" not in client._geny_course_cache
     assert client.course_calls == 3
+
+
+def test_geny_public_api_keeps_objective_finisher_facts_but_not_editorial_note():
+    payload = {
+        "cheval": {"id": 1, "nom": "Test Finisher"},
+        "performances": [{
+            "id": 9,
+            "rang": 2,
+            "cheval": {"id": 1, "nom": "Test Finisher"},
+            "positionsIntermediaires": [9, 7, 5, 2],
+            "placesGagneesDerniers500m": 3,
+            "rangDerniers500m": 2,
+            "noteFinDeCourse": "Très belle fin de course.",
+            "course": {"id": 99, "dateHeureCourse": "2026-09-01T14:00:00", "distance": 1600},
+            "reunion": {"nomReunion": "Test"},
+        }],
+    }
+    _, _, history = GenyApiParser.parse_horse(payload, "TEST FINISHER", 0)
+    assert history[0]["positions_intermediaires"] == [9, 7, 5, 2]
+    assert history[0]["places_gagnees_fin"] == 3
+    assert history[0]["rang_dernier_troncon"] == 2
+    assert "note" not in str(history[0]).lower()
+    assert "belle fin" not in str(history[0]).lower()
